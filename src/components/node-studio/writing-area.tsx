@@ -6,20 +6,50 @@ import { DraftState, StructureSection } from '@/pcs/types';
 import EmptyNode from './node-states/empty-node';
 import PlannedNode from './node-states/planned-node';
 import GeneratingNode from './node-states/generating-node';
+import DraftedNode from './node-states/drafted-node';
 
 // ---------------------------------------------------------------------------
 // State-component registry
 // ---------------------------------------------------------------------------
 
 type StateComponentMap = Partial<
-  Record<DraftState, React.ComponentType<{ nodeId: string; goal?: string }>>
+  Record<
+    DraftState,
+    React.ComponentType<{
+      nodeId: string;
+      goal?: string;
+      content?: string;
+      onComplete?: () => void;
+    }>
+  >
 >;
+
+function DraftedNodeWrapper({
+  nodeId,
+  goal,
+  content,
+  onComplete,
+}: {
+  nodeId: string;
+  goal?: string;
+  content?: string;
+  onComplete?: () => void;
+}) {
+  return (
+    <DraftedNode
+      nodeId={nodeId}
+      content={content ?? ''}
+      goal={goal ?? ''}
+      onComplete={onComplete ?? (() => {})}
+    />
+  );
+}
 
 const STATE_COMPONENTS: StateComponentMap = {
   empty: EmptyNode,
   planned: PlannedNode,
   generating: GeneratingNode,
-  drafted: DraftedNode,
+  drafted: DraftedNodeWrapper,
   reviewing: ReviewingNode,
   approved: ApprovedNode,
 };
@@ -27,15 +57,6 @@ const STATE_COMPONENTS: StateComponentMap = {
 // ---------------------------------------------------------------------------
 // Sub-components for states that don't have dedicated files yet
 // ---------------------------------------------------------------------------
-
-function DraftedNode({ nodeId }: { nodeId: string }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center text-gray-500">
-      <p className="mb-2 text-lg">✍️ 草稿已完成</p>
-      <p className="text-sm">节点 {nodeId} — 内容待审阅</p>
-    </div>
-  );
-}
 
 function ReviewingNode({ nodeId }: { nodeId: string }) {
   return (
@@ -90,7 +111,7 @@ export default function WritingArea({
   hasPrevious = false,
   hasNext = false,
 }: WritingAreaProps) {
-  const { currentNode: lifecycleNode } = useNodeLifecycle();
+  const { currentNode: lifecycleNode, startReview } = useNodeLifecycle();
   const [goalBarCollapsed, setGoalBarCollapsed] = useState(false);
 
   // Resolve section data: explicit prop > lifecycle hook > null
@@ -186,7 +207,12 @@ export default function WritingArea({
 
       {/* State-specific content */}
       <div className="flex-1 overflow-y-auto">
-        <StateComponent nodeId={nodeId} goal={resolvedSection?.goal} />
+        <StateComponent
+          nodeId={nodeId}
+          goal={resolvedSection?.goal}
+          content={resolvedSection?.content_draft}
+          onComplete={startReview}
+        />
       </div>
     </div>
   );

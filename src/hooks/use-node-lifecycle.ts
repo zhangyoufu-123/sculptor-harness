@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import { DraftState, StructureSection } from '@/pcs/types';
+import { usePCSContext } from '@/contexts/pcs-context';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,6 +48,7 @@ const VALID_TRANSITIONS: Record<DraftState, DraftState[]> = {
 
 export function useNodeLifecycle(): UseNodeLifecycleReturn {
   const [currentNode, setCurrentNode] = useState<StructureSection | null>(null);
+  const { updateSectionDraftState, updateSectionContent, getSections } = usePCSContext();
 
   // -----------------------------------------------------------------------
   // Transition helpers
@@ -89,10 +91,26 @@ export function useNodeLifecycle(): UseNodeLifecycleReturn {
   // Node entry
   // -----------------------------------------------------------------------
 
-  const enterNode = useCallback((nodeId: string, sections: StructureSection[]) => {
-    const found = sections.find((s) => s.id === nodeId) ?? null;
-    setCurrentNode(found);
-  }, []);
+  const enterNode = useCallback(
+    (nodeId: string, sections: StructureSection[]) => {
+      const found = sections.find((s) => s.id === nodeId) ?? null;
+      // Sync current content from PCS if available
+      if (found) {
+        const pcsSections = getSections();
+        const pcsNode = pcsSections.find((s) => s.id === nodeId);
+        if (pcsNode) {
+          setCurrentNode({
+            ...found,
+            draft_state: pcsNode.draft_state,
+            content_draft: pcsNode.content_draft,
+          });
+          return;
+        }
+      }
+      setCurrentNode(found);
+    },
+    [getSections],
+  );
 
   // -----------------------------------------------------------------------
   // State transition methods
@@ -100,17 +118,27 @@ export function useNodeLifecycle(): UseNodeLifecycleReturn {
 
   const planNode = useCallback(() => {
     applyTransition('planned');
-  }, [applyTransition]);
+    if (currentNode?.id) {
+      updateSectionDraftState(currentNode.id, 'planned');
+    }
+  }, [applyTransition, currentNode, updateSectionDraftState]);
 
   const startGeneration = useCallback(() => {
     applyTransition('generating');
-  }, [applyTransition]);
+    if (currentNode?.id) {
+      updateSectionDraftState(currentNode.id, 'generating');
+    }
+  }, [applyTransition, currentNode, updateSectionDraftState]);
 
   const completeGeneration = useCallback(
     (content: string) => {
       applyTransition('drafted', content);
+      if (currentNode?.id) {
+        updateSectionContent(currentNode.id, content);
+        updateSectionDraftState(currentNode.id, 'drafted');
+      }
     },
-    [applyTransition],
+    [applyTransition, currentNode, updateSectionContent, updateSectionDraftState],
   );
 
   const startReview = useCallback(() => {
@@ -119,11 +147,17 @@ export function useNodeLifecycle(): UseNodeLifecycleReturn {
 
   const approveNode = useCallback(() => {
     applyTransition('approved');
-  }, [applyTransition]);
+    if (currentNode?.id) {
+      updateSectionDraftState(currentNode.id, 'approved');
+    }
+  }, [applyTransition, currentNode, updateSectionDraftState]);
 
   const unlockNode = useCallback(() => {
     applyTransition('drafted');
-  }, [applyTransition]);
+    if (currentNode?.id) {
+      updateSectionDraftState(currentNode.id, 'drafted');
+    }
+  }, [applyTransition, currentNode, updateSectionDraftState]);
 
   const rejectAndReplan = useCallback(() => {
     applyTransition('planned');

@@ -2,219 +2,8 @@
 
 import { useMemo } from 'react';
 import Link from 'next/link';
-import { usePCS } from '@/hooks/use-pcs';
+import { usePCSContext } from '@/contexts/pcs-context';
 import PCSPanel from '@/components/pcs-viewer/pcs-panel';
-import type { PCSState } from '@/pcs/types';
-
-// ---------------------------------------------------------------------------
-// V1 mock PCS data — used when the user navigates directly without going
-// through the home page (where usePCS would be uninitialized).
-// ---------------------------------------------------------------------------
-
-function buildMockPCS(): PCSState {
-  const now = new Date().toISOString();
-  const id = crypto.randomUUID?.() ?? `pcs-${Date.now().toString(36)}`;
-
-  return {
-    id,
-    project_id: `proj-${Date.now().toString(36)}`,
-    phase: 'initializing',
-    created_at: now,
-    updated_at: now,
-    intent: {
-      purpose: {
-        value: 'inform',
-        status: 'assumed',
-        source: 'user',
-        confidence: 0.5,
-        last_updated: now,
-        proposal: null,
-      },
-      core_message: {
-        value: 'AI 辅助创作将彻底改变内容生产方式',
-        status: 'assumed',
-        source: 'user',
-        confidence: 0.6,
-        last_updated: now,
-        proposal: null,
-      },
-      desired_impact: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      target_emotion: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-    },
-    audience: {
-      audience_type: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      knowledge_level: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      relationship: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      pain_points: {
-        value: [],
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-    },
-    constraint: {
-      type: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      platform: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      format: {
-        value: 'markdown',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.8,
-        last_updated: now,
-        proposal: null,
-      },
-      length_min: {
-        value: 300,
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.5,
-        last_updated: now,
-        proposal: null,
-      },
-      length_max: {
-        value: 3000,
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.5,
-        last_updated: now,
-        proposal: null,
-      },
-      deadline: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      custom_constraints: {
-        value: [],
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-    },
-    knowledge: {
-      required_topics: [],
-      known_topics: [],
-      missing_information: [],
-      sources: {
-        value: [],
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-    },
-    structure: {
-      sections: [],
-    },
-    expression: {
-      tone: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      voice: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      avoid: {
-        value: [],
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      style_reference: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      format_reference: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-      thinking_reference: {
-        value: '',
-        status: 'assumed',
-        source: 'system',
-        confidence: 0.2,
-        last_updated: now,
-        proposal: null,
-      },
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Phase routing links
@@ -287,18 +76,20 @@ const PHASE_LABELS: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 export default function ProjectPage({ params }: { params: { id: string } }) {
-  const { pcsState, isLoaded } = usePCS();
-
-  // Fall back to mock data in V1 when navigating directly
-  const resolvedState = useMemo(
-    () => (isLoaded && pcsState ? pcsState : buildMockPCS()),
-    [pcsState, isLoaded],
-  );
+  const { pcsState } = usePCSContext();
 
   const phaseLinks = useMemo(
-    () => buildPhaseLinks(params.id, resolvedState.phase),
-    [params.id, resolvedState.phase],
+    () => (pcsState ? buildPhaseLinks(params.id, pcsState.phase) : []),
+    [params.id, pcsState],
   );
+
+  if (!pcsState) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+        <p className="text-gray-500">未加载 PCS 状态</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -318,7 +109,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
               bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300
             `}
           >
-            {PHASE_LABELS[resolvedState.phase] ?? resolvedState.phase}
+            {PHASE_LABELS[pcsState.phase] ?? pcsState.phase}
           </span>
         </div>
       </header>
@@ -372,7 +163,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             PCS 状态面板
           </h2>
           <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
-            <PCSPanel pcsState={resolvedState} />
+            <PCSPanel pcsState={pcsState} />
           </div>
         </section>
       </div>

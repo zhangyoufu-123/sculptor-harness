@@ -1,12 +1,16 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import IdeaInput from '@/components/home/idea-input';
 
 export default function Home() {
+  const router = useRouter();
+
   const handleSubmit = (idea: string) => {
+    // eslint-disable-next-line no-console
     console.log('Creating project from idea:', idea);
-    // V1: placeholder navigation — in production this routes to the project dashboard
-    alert(`项目已创建！\n\n创意: ${idea}`);
+    const projectId = `proj-${Date.now().toString(36)}`;
+    router.push(`/project/${projectId}`);
   };
 
   return (
