@@ -34,3 +34,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# error log (local only)
+.error-log.jsonl
+
+# playwright
+/test-results/
+/playwright-report/
