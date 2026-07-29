@@ -305,13 +305,22 @@ export interface RequiredTopic {
  *   `empty`       → node exists in the outline but has no content yet
  *   `planned`     → a `GenerationPlan` has been confirmed for this node
  *   `generating`  → the Scribe Agent is currently writing this node
+ *   `failed`      → LLM generation failed, user can retry
  *   `drafted`     → a draft exists and is ready for user review
  *   `reviewing`   → the user or Reviewer Agent is evaluating the draft
  *   `approved`    → the user has signed off on the current content
  *   `locked`      → the content is frozen; no further edits allowed
  */
 export type DraftState =
-  'empty' | 'planned' | 'generating' | 'drafted' | 'reviewing' | 'approved' | 'locked';
+  | 'empty'
+  | 'planned'
+  | 'generating'
+  | 'failed'
+  | 'drafted'
+  | 'reviewing'
+  | 'approved'
+  | 'revising'
+  | 'locked';
 
 /**
  * The rhetorical or logical role a node plays in the overall argument

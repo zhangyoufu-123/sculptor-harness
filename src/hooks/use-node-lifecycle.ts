@@ -20,6 +20,8 @@ interface UseNodeLifecycleReturn {
   startReview: () => void; // DRAFTED → REVIEWING
   approveNode: () => void; // REVIEWING → APPROVED
   unlockNode: () => void; // APPROVED → DRAFTED
+  failGeneration: () => void; // GENERATING → FAILED
+  retryGeneration: () => void; // FAILED → GENERATING
   rejectAndReplan: () => void; // DRAFTED → PLANNED
   skipToDrafting: () => void; // PLANNED → DRAFTED (skip generation)
 
@@ -35,10 +37,12 @@ interface UseNodeLifecycleReturn {
 const VALID_TRANSITIONS: Record<DraftState, DraftState[]> = {
   empty: ['planned'],
   planned: ['generating', 'drafted'], // can skip generation
-  generating: ['drafted'], // or stop early → drafted
+  generating: ['drafted', 'failed'], // generation can succeed or fail
   drafted: ['reviewing', 'planned'], // review or replan
   reviewing: ['approved', 'drafted'], // approve or go back
   approved: ['drafted'], // unlock to edit
+  revising: ['drafted'],
+  failed: ['generating'], // retry generation
   locked: [], // final state
 };
 
@@ -167,6 +171,18 @@ export function useNodeLifecycle(): UseNodeLifecycleReturn {
     applyTransition('drafted');
   }, [applyTransition]);
 
+  const failGeneration = useCallback(() => {
+    if (!currentNode?.id) return;
+    applyTransition('failed');
+    updateSectionDraftState(currentNode.id, 'failed');
+  }, [currentNode, applyTransition, updateSectionDraftState]);
+
+  const retryGeneration = useCallback(() => {
+    if (!currentNode?.id) return;
+    applyTransition('generating');
+    updateSectionDraftState(currentNode.id, 'generating');
+  }, [currentNode, applyTransition, updateSectionDraftState]);
+
   // -----------------------------------------------------------------------
   // Derived state
   // -----------------------------------------------------------------------
@@ -183,6 +199,8 @@ export function useNodeLifecycle(): UseNodeLifecycleReturn {
     startReview,
     approveNode,
     unlockNode,
+    failGeneration,
+    retryGeneration,
     rejectAndReplan,
     skipToDrafting,
     canTransition,

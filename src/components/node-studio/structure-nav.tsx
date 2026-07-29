@@ -14,9 +14,11 @@ const DRAFT_STATE_INDICATOR: Record<
   empty: { symbol: '○', label: '待处理', className: 'text-gray-400' },
   planned: { symbol: '◑', label: '已规划', className: 'text-yellow-500' },
   generating: { symbol: '◑', label: '生成中', className: 'text-blue-500 animate-pulse' },
+  failed: { symbol: '✕', label: '生成失败', className: 'text-red-500' },
   drafted: { symbol: '●', label: '已完成', className: 'text-green-500' },
   reviewing: { symbol: '●', label: '审核中', className: 'text-purple-500' },
   approved: { symbol: '✓', label: '已通过', className: 'text-emerald-600' },
+  revising: { symbol: '↻', label: '修订中', className: 'text-orange-500' },
   locked: { symbol: '🔒', label: '已锁定', className: 'text-gray-600' },
 };
 
