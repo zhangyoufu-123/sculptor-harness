@@ -14,6 +14,8 @@ interface BackgroundGuardianProps {
   content: string;
   /** Called when a new, non-dismissed conflict is detected. */
   onConflict: (message: string) => void;
+  /** Called when structural insights are detected. */
+  onInsight?: (insights: Array<{ type: string; message: string; paragraphIndex: number }>) => void;
   /** Child components (this is a non-visual wrapper). */
   children: React.ReactNode;
 }
@@ -26,21 +28,56 @@ interface BackgroundGuardianProps {
 const DEBOUNCE_MS = 2_000;
 
 // ---------------------------------------------------------------------------
-// Component
+// Mock insight detection (V1 — heuristics-based)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scans content for structural gaps using simple heuristics.
+ * V1 mock: returns insights based on keyword detection.
+ */
+function detectInsights(
+  content: string,
+): Array<{ type: string; message: string; paragraphIndex: number }> {
+  const results: Array<{ type: string; message: string; paragraphIndex: number }> = [];
+
+  // Detect missing data: mentions data/statistics without specific numbers
+  if (content.includes('数据') && !content.match(/\d+%/)) {
+    results.push({
+      type: 'missing_data',
+      message: '这段提到了数据但缺少具体数字',
+      paragraphIndex: 0,
+    });
+  }
+
+  // Detect missing case: uses "例如" (for example) but content is too short
+  if (content.includes('例如') && content.length < 200) {
+    results.push({
+      type: 'missing_case',
+      message: '这里可以增加一个具体案例来支撑观点',
+      paragraphIndex: 0,
+    });
+  }
+
+  return results;
+}
+
 // ---------------------------------------------------------------------------
 
 /**
  * BackgroundGuardian — Non-visual wrapper component that monitors for PCS
- * consistency conflicts in the background while the user is drafting.
+ * consistency conflicts and structural insights in the background while
+ * the user is drafting.
  *
  * - Debounces calls to `useAIOperations.backgroundCheck` (2 s delay).
  * - Only alerts for conflicts that have NOT been dismissed this session.
  * - Dismissed set resets when `nodeId` changes (new node → clean slate).
+ * - Runs mock insight detection and reports via `onInsight` callback.
  */
 export default function BackgroundGuardian({
   nodeId,
   content,
   onConflict,
+  onInsight,
   children,
 }: BackgroundGuardianProps) {
   const aiOps = useAIOperations();
@@ -61,20 +98,26 @@ export default function BackgroundGuardian({
       try {
         const result = await aiOps.backgroundCheck(currentNodeId, currentContent);
 
-        if (!result.hasConflict || !result.message) return;
+        // ---- Conflict detection ------------------------------------------
+        if (result.hasConflict && result.message) {
+          setDismissedMessages((prev) => {
+            if (prev.has(result.message!)) return prev;
+            // New conflict — notify parent
+            onConflict(result.message!);
+            return prev;
+          });
+        }
 
-        // Skip if user already dismissed this exact message this session
-        setDismissedMessages((prev) => {
-          if (prev.has(result.message!)) return prev;
-          // New conflict — notify parent
-          onConflict(result.message!);
-          return prev;
-        });
+        // ---- Insight detection (V1 mock heuristics) ----------------------
+        const insights = detectInsights(currentContent);
+        if (insights.length > 0 && onInsight) {
+          onInsight(insights);
+        }
       } catch {
         // Silent failure — background check is best-effort
       }
     },
-    [aiOps, onConflict],
+    [aiOps, onConflict, onInsight],
   );
 
   // ---- Effect: debounce content changes -----------------------------------
