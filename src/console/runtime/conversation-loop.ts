@@ -21,6 +21,7 @@ import {
   type BeliefState,
 } from '@/runtime/intent/belief-state';
 import { planNextQuestion } from '@/runtime/intent/question-planner';
+import type { SessionState } from '@/engine/orchestrator';
 
 // =========================================================================
 // Types
@@ -835,4 +836,197 @@ export function startConversationLoop(): void {
       },
     ];
   }
+}
+
+// =========================================================================
+// Orchestrator-to-Console bridge: startWritingPhase
+// =========================================================================
+
+/**
+ * Start the writing phase with a pre-built session state from the orchestrator.
+ * Skips the discovery/clarify phases entirely.
+ */
+export function startWritingPhase(orchestratorState: SessionState): void {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  // Convert orchestrator state to session state
+  const sections: StructureSection[] = orchestratorState.outline.map(
+    (s, i) =>
+      ({
+        id: `n${i + 1}`,
+        title: s.title,
+        goal: s.goal,
+        function:
+          i === 0
+            ? 'introduce'
+            : i === orchestratorState.outline.length - 1
+              ? 'conclude'
+              : 'argument',
+        hardness: 'hard',
+        draft_state: i === 0 ? 'drafted' : 'empty',
+        content_draft: s.content || '',
+        pcs_status: 'confirmed',
+        source: 'ai',
+        confidence: 0.9,
+        order: i,
+      }) as StructureSection,
+  );
+
+  const session: ConsoleSession = {
+    phase: 'writing_menu',
+    projectId: `proj-${Date.now().toString(36)}`,
+    manager: null,
+    sections,
+    currentSectionIdx: orchestratorState.currentSection,
+    clarifyIdx: 0,
+    debug: true,
+    rl,
+    messages: orchestratorState.messages.map((m) => ({
+      role: m.role as 'user' | 'assistant' | 'system',
+      content: m.content,
+    })),
+    nodeContents: {},
+    creativeType: orchestratorState.belief.artifactType,
+    clarifyDims: [],
+    understandingResult: null,
+    beliefState: null,
+  };
+
+  // Initialize node contents from orchestrator
+  for (const s of sections) {
+    if (s.content_draft) session.nodeContents[s.id] = s.content_draft;
+  }
+
+  console.log(`\n📐 大纲 (${sections.length} 节):`);
+  sections.forEach((s, i) => {
+    const hasContent = s.content_draft;
+    const status = hasContent ? '✅' : '  ';
+    console.log(`  ${status} ${i + 1}. ${s.title} — ${s.goal}`);
+  });
+  console.log('\n操作: 输入编号开始写作  /gen 生成  /done 完成  /full 预览  /export 导出');
+  rl.setPrompt('\n> ');
+  rl.prompt();
+
+  // Wire up the line handler for writing phase
+  rl.on('line', (line: string) => {
+    const input = line.trim();
+    if (input === '/exit') {
+      console.log('\n👋 再见！\n');
+      rl.close();
+      return;
+    }
+    if (input === '/full') {
+      showFullText(session);
+      rl.prompt();
+      return;
+    }
+    if (input === '/export') {
+      doExport(session);
+      rl.prompt();
+      return;
+    }
+
+    // Writing menu
+    if (session.phase === 'writing_menu') {
+      const num = parseInt(input);
+      if (num >= 1 && num <= sections.length) {
+        session.currentSectionIdx = num - 1;
+        session.phase = 'writing_node';
+        const s = sections[num - 1];
+        const content = session.nodeContents[s.id] || '';
+        console.log(`\n✍️ ${s.title}: ${s.goal}`);
+        if (content) console.log(`\n${content}`);
+        console.log('\n/gen 生成  /done 完成  /back 返回');
+      }
+      rl.prompt();
+      return;
+    }
+
+    // Writing node
+    if (session.phase === 'writing_node') {
+      if (input === '/gen') {
+        generateSectionContent(session);
+        rl.prompt();
+        return;
+      }
+      if (input === '/done') {
+        advanceSection(session, rl);
+        return;
+      }
+      if (input === '/back') {
+        session.phase = 'writing_menu';
+        rl.prompt();
+        return;
+      }
+      // Save user input as content
+      const s = sections[session.currentSectionIdx];
+      session.nodeContents[s.id] = input;
+      console.log(`  ✅ 已保存 (${input.length} 字)`);
+      rl.prompt();
+      return;
+    }
+
+    rl.prompt();
+  });
+}
+
+// Helper functions for writing phase
+function showFullText(session: ConsoleSession): void {
+  console.log('\n━━━ 全文预览 ━━━');
+  for (const s of session.sections) {
+    const content = session.nodeContents[s.id] || s.content_draft || '(空)';
+    console.log(`\n【${s.title}】\n${content}`);
+  }
+}
+
+function doExport(session: ConsoleSession): void {
+  console.log('\n━━━ 导出 ━━━');
+  let full = '';
+  for (const s of session.sections) {
+    full += `\n## ${s.title}\n\n${session.nodeContents[s.id] || s.content_draft || ''}\n`;
+  }
+  console.log(full);
+  console.log(`\n✅ 总字数: ${full.length}`);
+}
+
+async function generateSectionContent(session: ConsoleSession): Promise<void> {
+  const { generateContent } = await import('@/skills/content-generation');
+  const s = session.sections[session.currentSectionIdx];
+  const belief = session.creativeType; // stored as artifact type
+  const prevContent =
+    session.currentSectionIdx > 0
+      ? session.nodeContents[session.sections[session.currentSectionIdx - 1].id]
+      : undefined;
+  const nextTitle =
+    session.currentSectionIdx < session.sections.length - 1
+      ? session.sections[session.currentSectionIdx + 1].title
+      : undefined;
+
+  console.log('\n⏳ 生成中...');
+  const result = await generateContent({
+    sectionTitle: s.title,
+    sectionGoal: s.goal,
+    artifactType: belief || '文章',
+    topic: s.goal,
+    audience: '普通读者',
+    tone: '自然',
+    previousContent: prevContent,
+    nextSectionTitle: nextTitle,
+  });
+
+  session.nodeContents[s.id] = result.content;
+  console.log(`\n${result.content}`);
+}
+
+function advanceSection(session: ConsoleSession, rl: readline.Interface): void {
+  session.currentSectionIdx++;
+  if (session.currentSectionIdx >= session.sections.length) {
+    console.log('\n🎉 全部完成！输入 /full 预览 /export 导出');
+    session.phase = 'writing_menu';
+  } else {
+    const s = session.sections[session.currentSectionIdx];
+    console.log(`\n下一节: ${s.title} — ${s.goal}`);
+    console.log('/gen 生成  /back 返回');
+  }
+  rl.prompt();
 }
