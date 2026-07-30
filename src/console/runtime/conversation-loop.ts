@@ -14,6 +14,13 @@ import { createPCSState, createMockField } from '@/test/mocks/pcs-factory';
 import type { PCSState, StructureSection, DraftState, NodeFunction } from '@/pcs/types';
 import { artifactBuilder } from '@/discovery/artifact-builder';
 import { understandWithLLM, type LLMUnderstandingResult } from '@/runtime/intent/llm-understander';
+import {
+  createBeliefState,
+  updateBelief,
+  getBeliefSummary,
+  type BeliefState,
+} from '@/runtime/intent/belief-state';
+import { planNextQuestion } from '@/runtime/intent/question-planner';
 
 // =========================================================================
 // Types
@@ -48,6 +55,7 @@ interface ConsoleSession {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   clarifyDims: any[];
   understandingResult: LLMUnderstandingResult | null;
+  beliefState: BeliefState | null;
 }
 
 // =========================================================================
@@ -108,6 +116,7 @@ export function startConversationLoop(): void {
     creativeType: 'article',
     clarifyDims: [],
     understandingResult: null,
+    beliefState: null,
   };
 
   // =========================================================================
@@ -176,46 +185,50 @@ export function startConversationLoop(): void {
     session.manager = new PCSManager(state);
     trace('PCS', `Project ${session.projectId} initialized`);
 
-    // LLM Understanding
-    say('\n⏳ AI 正在理解你的意图...');
+    // Initialize Belief State (the cognitive model)
+    const belief = createBeliefState(idea);
+    session.beliefState = belief;
+
+    // Use LLM to form initial understanding
+    trace('BELIEF', `Initialized — ${belief.uncertainties.length} uncertainties`);
 
     const result = await understandWithLLM(idea);
     session.understandingResult = result;
 
+    // Populate belief state from LLM understanding
     const u = result.understanding;
-    trace('LLM', result.llmSuccess ? 'DeepSeek API ✓' : 'Using fallback (API unavailable)');
-    trace(
-      'UNDERSTAND',
-      `${u.artifactType} (${Math.round(u.artifactConfidence * 100)}%) — ${u.summary}`,
-    );
-    trace('TOPIC', u.topic);
+    belief.artifactBeliefs.push({
+      type: u.artifactType,
+      confidence: u.artifactConfidence,
+      signals: result.hypotheses.map((h) => h.direction),
+    });
+    belief.topicBeliefs.push({
+      topic: u.topic,
+      confidence: u.artifactConfidence,
+      subtopics: [],
+    });
 
-    for (const h of result.hypotheses) {
-      trace('HYPOTHESIS', `${h.direction} (${Math.round(h.confidence * 100)}%) — ${h.reason}`);
-    }
+    trace('LLM', result.llmSuccess ? 'DeepSeek ✓' : 'Fallback');
+    trace('BELIEF', getBeliefSummary(belief));
 
-    trace('UNKNOWNS', result.unknowns.join('、'));
-
-    // Display understanding
+    // Show understanding
     say(`\n💡 我理解：你想创作一个 **${u.artifactType}**`);
     say(`   主题: "${u.topic}"`);
-    say(`   置信度: ${Math.round(u.artifactConfidence * 100)}%`);
+    trace('TOPIC', u.topic);
 
-    if (result.hypotheses.length > 0) {
-      say('\n📋 可能的创作方向:');
-      result.hypotheses.forEach((h, i) => {
-        say(`   ${i + 1}. ${h.direction}`);
-      });
-    }
+    // Plan the next best question using Active Learning
+    const planned = planNextQuestion(belief);
 
-    // Show next question
-    say(`\n❓ ${result.nextQuestion.text}`);
-    if (result.nextQuestion.options.length > 0) {
-      result.nextQuestion.options.forEach((opt, i) => {
-        say(`   ${i + 1}. ${opt}`);
-      });
+    if (planned) {
+      trace('QUESTION', `IG:${Math.round(planned.expectedGain * 100)}% — ${planned.reason}`);
+      say(`\n❓ ${planned.text}`);
+      if (planned.options.length > 0) {
+        planned.options.forEach((opt, i) => say(`   ${i + 1}. ${opt}`));
+      }
+      say(`\n   💬 回答或 /skip /done`);
+    } else {
+      say('\n✅ 信息充足，进入蓝图。输入 /done 确认。');
     }
-    say(`\n   💬 直接输入你的回答，或 /skip 跳过 /done 进入写作`);
 
     prompt();
   }
@@ -459,37 +472,41 @@ export function startConversationLoop(): void {
         break;
 
       case 'clarify': {
-        if (input === '/done') {
-          finishClarify();
-          break;
-        }
-        if (input === '/skip') {
-          say('  已跳过，进入蓝图');
-          finishClarify();
-          break;
-        }
-        // User answered — re-understand with context
-        const history = session.messages
-          .slice(-10)
-          .map((m) => `${m.role}: ${m.content}`)
-          .join('\n');
-        understandWithLLM(input, history).then((newResult) => {
-          session.understandingResult = newResult;
-          const u = newResult.understanding;
-          trace(
-            'REFINE',
-            `Updated: ${u.artifactType} (${Math.round(u.artifactConfidence * 100)}%)`,
-          );
-          say(`\n💡 更新理解: ${u.summary}`);
-          if (newResult.nextQuestion.text) {
-            say(`\n❓ ${newResult.nextQuestion.text}`);
-            if (newResult.nextQuestion.options.length > 0) {
-              newResult.nextQuestion.options.forEach((opt, i) => say(`   ${i + 1}. ${opt}`));
-            }
+        if (input === '/done' || input === '/skip') {
+          if (session.beliefState) {
+            trace('BELIEF', `Complete — ${getBeliefSummary(session.beliefState)}`);
           }
-          say('\n   💬 继续回答，或 /done 进入写作');
-          prompt();
-        });
+          finishClarify();
+          break;
+        }
+
+        // Update belief state with user answer
+        if (session.beliefState) {
+          const prevQ = session.beliefState.uncertainties.find((u) => u.asked);
+          updateBelief(session.beliefState, input, prevQ?.question);
+          trace('BELIEF', getBeliefSummary(session.beliefState));
+        }
+
+        addMessage('user', input);
+
+        // Plan next question
+        const planned = session.beliefState ? planNextQuestion(session.beliefState) : null;
+
+        if (planned) {
+          say(`\n❓ ${planned.text}`);
+          if (planned.options.length > 0) {
+            planned.options.forEach((opt, i) => say(`   ${i + 1}. ${opt}`));
+          }
+          trace(
+            'QUESTION',
+            `Next: ${planned.addresses} (IG:${Math.round(planned.expectedGain * 100)}%)`,
+          );
+          say('\n   💬 继续回答 /done 进入蓝图');
+        } else {
+          say('\n✅ 已收集足够信息。输入 /done 进入蓝图。');
+        }
+
+        prompt();
         break;
       }
 
