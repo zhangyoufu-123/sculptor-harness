@@ -12,6 +12,10 @@ import * as readline from 'readline';
 import { PCSManager } from '@/pcs/pcs-manager';
 import { createPCSState, createMockField } from '@/test/mocks/pcs-factory';
 import type { PCSState, StructureSection, DraftState, NodeFunction } from '@/pcs/types';
+import { classifyCreativeType, CREATIVE_TYPE_LABELS } from '@/runtime/creative-type-router';
+import { getClarificationSchema } from '@/runtime/clarification-schemas';
+import type { ClarifyDimension } from '@/runtime/clarification-schemas';
+import type { CreativeType } from '@/runtime/creative-type-router';
 
 // =========================================================================
 // Types
@@ -39,79 +43,14 @@ interface ConsoleSession {
   clarifyIdx: number;
   debug: boolean;
   rl: readline.Interface;
-  // Conversation memory
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
-  // Writing state
   nodeContents: Record<string, string>;
+  // Dynamic clarification
+  creativeType: CreativeType;
+  clarifyDims: ClarifyDimension[];
 }
 
 // =========================================================================
-// Clarification dimensions (ordered interview)
-// =========================================================================
-
-interface ClarifyDimension {
-  key: string;
-  label: string;
-  field: string;
-  options: string[];
-}
-
-const CLARIFY_DIMS: ClarifyDimension[] = [
-  {
-    key: 'purpose',
-    label: '创作目的',
-    field: 'intent.purpose',
-    options: ['科普AI教育应用', '分析商业机会', '探讨教师角色变化', '论证AI教育必要性'],
-  },
-  {
-    key: 'core_message',
-    label: '核心观点',
-    field: 'intent.core_message',
-    options: [
-      'AI不会替代教师但会重塑教育',
-      'AI教育是下一个产业风口',
-      '教育者应主动拥抱AI',
-      'AI教育的核心是个性化',
-    ],
-  },
-  {
-    key: 'tone',
-    label: '语气风格',
-    field: 'expression.tone',
-    options: ['专业分析型', '轻松科普型', '故事叙事型', '尖锐评论型'],
-  },
-  {
-    key: 'audience',
-    label: '目标读者',
-    field: 'audience.audience_type',
-    options: ['教育从业者', '普通读者', '投资人', '技术专家'],
-  },
-  {
-    key: 'knowledge',
-    label: '读者水平',
-    field: 'audience.knowledge_level',
-    options: ['入门', '中级', '专家'],
-  },
-  {
-    key: 'format',
-    label: '交付格式',
-    field: 'constraint.format',
-    options: ['公众号文章', '学术论文', '商业报告', '演讲稿'],
-  },
-  {
-    key: 'length',
-    label: '字数范围',
-    field: 'constraint.length_min',
-    options: ['1000字', '2000-3000字', '5000字以上'],
-  },
-  {
-    key: 'success',
-    label: '成功标准',
-    field: 'intent.desired_impact',
-    options: ['读者转发', '通过审稿', '说服读者', '建立权威'],
-  },
-];
-
 // =========================================================================
 // Blueprint (preset sections, adjustable)
 // =========================================================================
@@ -162,10 +101,12 @@ export function startConversationLoop(): void {
     sections: [],
     currentSectionIdx: 0,
     clarifyIdx: 0,
-    debug: true, // DEFAULT ON for MVP
+    debug: true,
     rl,
     messages: [],
     nodeContents: {},
+    creativeType: 'article',
+    clarifyDims: [],
   };
 
   // =========================================================================
@@ -234,58 +175,70 @@ export function startConversationLoop(): void {
     });
     session.manager = new PCSManager(state);
     trace('PCS', `Project ${session.projectId} initialized`);
-    trace('INTENT', `Parsed idea: "${idea.slice(0, 50)}"`);
+
+    // Creative Type Routing
+    const routing = classifyCreativeType(idea);
+    session.creativeType = routing.type;
+    const typeLabel = CREATIVE_TYPE_LABELS[routing.type];
+    trace(
+      'ROUTER',
+      `Detected: ${typeLabel.emoji} ${typeLabel.label} (${Math.round(routing.confidence * 100)}%)`,
+    );
+    trace('ROUTER', `Signals: ${routing.signals.join(', ') || '无明确信号'}`);
+    trace('ROUTER', `Explanation: ${routing.explanation}`);
+
+    // Load type-specific clarification schema
+    const schema = getClarificationSchema(routing.type);
+    session.clarifyDims = schema.dimensions;
+    trace('SCHEMA', `Loaded: ${schema.type} — ${session.clarifyDims.length} dimensions`);
 
     say(`\n收到："${idea}"`);
-    say('\n我先理解你的目标。确认几个关键维度：');
+    say(`\n${typeLabel.emoji} 我理解：你想创作一个 ${typeLabel.label}`);
+    if (routing.signals.length > 0) {
+      say(`   检测到关键词: ${routing.signals.join('、')}`);
+    }
+    say(`\n${schema.intro}`);
+
     showClarifyQuestion();
   }
 
   function showClarifyQuestion(): void {
-    const dim = CLARIFY_DIMS[session.clarifyIdx];
+    const dim = session.clarifyDims[session.clarifyIdx];
     if (!dim) return;
 
-    divider(`${session.clarifyIdx + 1}/${CLARIFY_DIMS.length}  ${dim.label}`);
+    const total = session.clarifyDims.length;
+    divider(`${session.clarifyIdx + 1}/${total}  ${dim.label}`);
     dim.options.forEach((opt, i) => console.log(`  ${i + 1}. ${opt}`));
+    if (dim.hint) say(`\n  💡 ${dim.hint}`);
     say('\n选择编号或直接输入自定义内容 (/skip 跳过 /back 返回上一项)');
     prompt();
   }
 
   function handleClarifyAnswer(input: string): void {
-    const dim = CLARIFY_DIMS[session.clarifyIdx];
+    const dim = session.clarifyDims[session.clarifyIdx];
     if (!dim || !session.manager) return;
 
     let value = input;
     if (input === '/skip') {
-      value = dim.options[0];
+      value = dim.options[0] || '';
     } else if (input === '/back' && session.clarifyIdx > 0) {
       session.clarifyIdx--;
       showClarifyQuestion();
       return;
     } else {
       const num = parseInt(input, 10);
-      if (num >= 1 && num <= dim.options.length) value = dim.options[num - 1];
+      if (!isNaN(num) && num >= 1 && num <= dim.options.length) value = dim.options[num - 1];
     }
 
     // Write to PCS
     const result = session.manager.writeField(dim.field, value, 'user');
     trace('FIELD', `${dim.field} = "${value}" ${result.success ? '✓' : '✗'}`);
 
-    // Handle special: length needs actual number
-    if (dim.key === 'length') {
-      const lenMap: Record<string, number> = {
-        '1000字': 1000,
-        '2000-3000字': 2500,
-        '5000字以上': 5000,
-      };
-      session.manager.writeField('constraint.length_min', lenMap[value] || 1000, 'user');
-    }
-
     addMessage('assistant', `${dim.label}: ${value}`);
     say(`  ✅ ${dim.label} → ${value}`);
 
     session.clarifyIdx++;
-    if (session.clarifyIdx >= CLARIFY_DIMS.length) {
+    if (session.clarifyIdx >= session.clarifyDims.length) {
       finishClarify();
     } else {
       showClarifyQuestion();
