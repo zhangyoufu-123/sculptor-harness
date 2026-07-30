@@ -1,585 +1,408 @@
 // ---------------------------------------------------------------------------
 // Sculptor V1 — Review Engine (Phase 4→5: reviewing)
 //
-// Runs a multi-dimensional quality review of the completed work against the
-// original creative intent, all constraints, knowledge requirements, and
-// structural plan. Produces a ReviewReport that gates progression to
-// the `completed` phase.
+// V1 upgrade: 8 rule-based checks with zero LLM cost. Each check produces
+// actionable feedback with specific suggestions, not just scores.
+//
+// Checks:
+//   1. Completeness          — content present and above minimum length
+//   2. Intent Alignment      — keyword overlap with the creative goal
+//   3. Length Constraint     — word-count vs target
+//   4. Style Consistency     — avoid-list violations
+//   5. Knowledge Coverage    — required topics present
+//   6. Readability           — sentence-length × audience mismatch
+//   7. Sentence Cohesion     — adjacent-sentence word overlap
+//   8. Grammar Issues        — punctuation repetition, overlong paragraphs
 // ---------------------------------------------------------------------------
 
+import type { AgentRequest, AgentResponse, IPCSAccessor, AgentId } from './types';
 import { BaseAgent } from './types';
 import { createAgentResponse, startTimer } from './base-agent';
-import type { AgentRequest, AgentResponse, IPCSAccessor } from './types';
-import { LLMClient } from '@/lib/llm-client';
-import { AlgorithmRunner } from '@/lib/algorithm-runner';
-import { checkConstraints } from '@/algorithms/constraint-checker';
-import { REVIEW_CHECKLIST_PROMPT } from '@/prompts/review-engine';
-import type { PCSState, ReviewReport, ReviewIssue, ReviewDimension } from '@/pcs/types';
+import type { ReviewIssue, ReviewDimension } from '@/pcs/types';
 
 // ---------------------------------------------------------------------------
-// Shared instances
+// Types
 // ---------------------------------------------------------------------------
 
-const llmClient = new LLMClient();
-const algorithmRunner = new AlgorithmRunner();
+interface ReviewCheck {
+  dimension: ReviewDimension;
+  name: string;
+  fn: (content: string, context: Record<string, unknown>) => ReviewIssue[];
+}
 
 // ---------------------------------------------------------------------------
 // ReviewEngine
 // ---------------------------------------------------------------------------
 
 export class ReviewEngine extends BaseAgent {
+  readonly agentId: AgentId = 'review' as AgentId;
+
+  private checks: ReviewCheck[] = [];
+
   constructor(pcs: IPCSAccessor) {
-    super('review', pcs);
+    super('review' as AgentId, pcs);
+    this.initializeChecks();
   }
+
+  // -----------------------------------------------------------------------
+  // Public API
+  // -----------------------------------------------------------------------
 
   async execute(request: AgentRequest): Promise<AgentResponse> {
     const stop = startTimer();
-    const action = request.action;
-    const snapshot = request.pcsSnapshot;
 
-    switch (action) {
-      // ── review ────────────────────────────────────────────────────
+    switch (request.action) {
       case 'review': {
-        const fullContent = assembleFullContent(snapshot);
+        const payload = request.payload as {
+          nodeId?: string;
+          content?: string;
+          goal?: string;
+          avoidList?: string[];
+          requiredTopics?: string[];
+          targetAudience?: string;
+          targetLength?: number;
+        };
 
-        // Run all five consistency checks
-        const [intentResult, knowledgeResult, constraintResult, expressionResult, structureResult] =
-          await Promise.all([
-            algorithmRunner.run({ name: 'review-intent-satisfaction' }, () =>
-              Promise.resolve(checkIntentSatisfaction(snapshot, fullContent)),
-            ),
-            algorithmRunner.run({ name: 'review-knowledge-coverage' }, () =>
-              Promise.resolve(checkKnowledgeCoverage(snapshot, fullContent)),
-            ),
-            algorithmRunner.run({ name: 'review-constraint-compliance' }, () =>
-              checkConstraintCompliance(snapshot, fullContent),
-            ),
-            algorithmRunner.run({ name: 'review-expression-consistency' }, () =>
-              Promise.resolve(checkExpressionConsistency(snapshot, fullContent)),
-            ),
-            algorithmRunner.run({ name: 'review-structure-completeness' }, () =>
-              Promise.resolve(checkStructureCompleteness(snapshot, fullContent)),
-            ),
-          ]);
+        const content = payload.content || '';
 
-        // Collect all issues
+        const context: Record<string, unknown> = {
+          nodeId: payload.nodeId || '',
+          goal: payload.goal || '',
+          avoidList: payload.avoidList || [],
+          requiredTopics: payload.requiredTopics || [],
+          targetAudience: payload.targetAudience || '普通读者',
+          targetLength: payload.targetLength || 2000,
+        };
+
+        // Run all 8 checks
         const allIssues: ReviewIssue[] = [];
-        const dimensionResults: Array<{
-          name: ReviewDimension;
-          label: string;
-          score: number;
-          passed: boolean;
-          issues: ReviewIssue[];
-        }> = [];
-
-        const addDimension = (
-          name: ReviewDimension,
-          label: string,
-          issues: ReviewIssue[],
-        ): void => {
+        for (const check of this.checks) {
+          const issues = check.fn(content, context);
           allIssues.push(...issues);
-          const blockingCount = issues.filter((i) => i.severity === 'blocking').length;
-          const warningCount = issues.filter((i) => i.severity === 'warning').length;
-          const passCount = issues.filter((i) => i.severity === 'pass').length;
-          const total = issues.length;
-          const score = total > 0 ? (passCount * 1.0 + warningCount * 0.5) / total : 1.0;
-
-          dimensionResults.push({
-            name,
-            label,
-            score: Math.round(score * 100) / 100,
-            passed: blockingCount === 0,
-            issues,
-          });
-        };
-
-        const fallbackIntent: ReviewIssue[] = [
-          {
-            id: 'err-intent',
-            dimension: 'intent_satisfaction',
-            severity: 'blocking',
-            description: '意图满足度检查失败',
-          },
-        ];
-        const fallbackKnowledge: ReviewIssue[] = [
-          {
-            id: 'err-knowledge',
-            dimension: 'knowledge_coverage',
-            severity: 'blocking',
-            description: '知识覆盖度检查失败',
-          },
-        ];
-        const fallbackConstraint: ReviewIssue[] = [
-          {
-            id: 'err-constraint',
-            dimension: 'constraint_compliance',
-            severity: 'blocking',
-            description: '约束合规度检查失败',
-          },
-        ];
-        const fallbackExpression: ReviewIssue[] = [
-          {
-            id: 'err-expression',
-            dimension: 'expression_consistency',
-            severity: 'blocking',
-            description: '表达一致性检查失败',
-          },
-        ];
-        const fallbackStructure: ReviewIssue[] = [
-          {
-            id: 'err-structure',
-            dimension: 'structure_completeness',
-            severity: 'blocking',
-            description: '结构完整度检查失败',
-          },
-        ];
-
-        addDimension(
-          'intent_satisfaction',
-          '意图满足度',
-          intentResult.success ? (intentResult.data ?? fallbackIntent) : fallbackIntent,
-        );
-        addDimension(
-          'knowledge_coverage',
-          '知识覆盖度',
-          knowledgeResult.success ? (knowledgeResult.data ?? fallbackKnowledge) : fallbackKnowledge,
-        );
-        addDimension(
-          'constraint_compliance',
-          '约束合规度',
-          constraintResult.success
-            ? (constraintResult.data ?? fallbackConstraint)
-            : fallbackConstraint,
-        );
-        addDimension(
-          'expression_consistency',
-          '表达一致性',
-          expressionResult.success
-            ? (expressionResult.data ?? fallbackExpression)
-            : fallbackExpression,
-        );
-        addDimension(
-          'structure_completeness',
-          '结构完整度',
-          structureResult.success ? (structureResult.data ?? fallbackStructure) : fallbackStructure,
-        );
-
-        // Build ReviewReport
-        const reviewReport: ReviewReport = {
-          id: `review-${Date.now().toString(36)}`,
-          timestamp: new Date().toISOString(),
-          phase: 'reviewing',
-          issues: allIssues,
-          summary: {
-            total: allIssues.length,
-            blocking: allIssues.filter((i) => i.severity === 'blocking').length,
-            warning: allIssues.filter((i) => i.severity === 'warning').length,
-            pass: allIssues.filter((i) => i.severity === 'pass').length,
-          },
-        };
-
-        // Try LLM-powered review for richer analysis
-        let llmCalls = 0;
-        let tokensUsed = 0;
-        let llmReviewResult: unknown = null;
-
-        try {
-          const variables: Record<string, unknown> = {
-            full_content: fullContent,
-            intent_summary: buildIntentSummary(snapshot),
-            knowledge_summary: buildKnowledgeSummary(snapshot),
-            constraint_summary: buildConstraintSummary(snapshot),
-            expression_summary: buildExpressionSummary(snapshot),
-            structure_summary: buildStructureSummary(snapshot),
-          };
-
-          const systemPrompt = REVIEW_CHECKLIST_PROMPT.systemPrompt ?? '';
-          let prompt = REVIEW_CHECKLIST_PROMPT.template;
-          for (const [key, val] of Object.entries(variables)) {
-            prompt = prompt.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(val));
-          }
-
-          const response = await llmClient.complete({
-            prompt,
-            systemPrompt,
-            responseFormat: 'json',
-            maxTokens: REVIEW_CHECKLIST_PROMPT.maxTokens,
-          });
-
-          llmCalls = 1;
-          tokensUsed = response.usage.totalTokens;
-          llmReviewResult = response.json;
-        } catch {
-          // LLM review unavailable — rule-based results are sufficient
         }
 
-        const approved = reviewReport.summary.blocking === 0;
-        const latency = stop();
+        const blocking = allIssues.filter((i) => i.severity === 'blocking');
+        const warnings = allIssues.filter((i) => i.severity === 'warning');
+        const passIssues = allIssues.filter((i) => i.severity === 'pass');
 
-        return createAgentResponse('review', action, {
+        return createAgentResponse(this.agentId, 'review', {
           result: {
-            report: reviewReport,
-            dimensions: dimensionResults,
-            llmReview: llmReviewResult,
-            approved,
+            issues: allIssues,
+            summary: {
+              total: allIssues.length,
+              blocking: blocking.length,
+              warning: warnings.length,
+              pass: passIssues.length,
+            },
           },
-          nextActions: approved ? ['export'] : ['revise'],
-          latency,
-          llmCalls,
-          tokensUsed,
-        });
-      }
-
-      // ── export ────────────────────────────────────────────────────
-      case 'export': {
-        const fullContent = assembleFullContent(snapshot);
-        const format = snapshot.constraint.format.value || 'markdown';
-
-        let exported = fullContent;
-        if (format === 'plain-text') {
-          exported = stripMarkdown(fullContent);
-        }
-
-        const latency = stop();
-        return createAgentResponse('review', action, {
-          result: {
-            exported,
-            format,
-            length: exported.length,
-            sectionCount: snapshot.structure.sections.length,
-          },
-          nextActions: ['complete'],
-          latency,
+          pcsMutations: [],
+          nextActions: blocking.length > 0 ? ['fix_blocking'] : ['approve'],
+          latency: stop(),
+          llmCalls: 0,
+          tokensUsed: 0,
         });
       }
 
       default:
-        return createAgentResponse('review', action, {
-          result: { error: `Unknown action: ${action}` },
+        return createAgentResponse(this.agentId, request.action, {
+          result: null,
+          pcsMutations: [],
+          nextActions: [],
           latency: stop(),
+          llmCalls: 0,
+          tokensUsed: 0,
         });
     }
   }
-}
 
-// ---------------------------------------------------------------------------
-// Five-dimension consistency checks (V1: rule-based)
-// ---------------------------------------------------------------------------
+  // -----------------------------------------------------------------------
+  // Check registry
+  // -----------------------------------------------------------------------
 
-let issueCounter = 0;
-function nextIssueId(): string {
-  issueCounter += 1;
-  return `ri-${Date.now().toString(36)}-${issueCounter}`;
-}
-
-function tokenize(text: string): string[] {
-  return text
-    .split(/[，,。！？、；：\s.!?;:\n]+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length >= 2);
-}
-
-// 1. Intent Satisfaction
-function checkIntentSatisfaction(state: PCSState, content: string): ReviewIssue[] {
-  const issues: ReviewIssue[] = [];
-  const coreMessage = state.intent.core_message.value;
-
-  if (!coreMessage || coreMessage.trim().length === 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'intent_satisfaction',
-      severity: 'warning',
-      description: '核心信息未设置，无法检查意图满足度。',
-    });
-    return issues;
+  private initializeChecks(): void {
+    this.checks = [
+      { dimension: 'structure_completeness', name: '章节完整度', fn: this.checkCompleteness },
+      { dimension: 'intent_satisfaction', name: '意图一致性', fn: this.checkIntentAlignment },
+      { dimension: 'constraint_compliance', name: '长度约束', fn: this.checkLengthConstraint },
+      { dimension: 'expression_consistency', name: '风格一致性', fn: this.checkStyleConsistency },
+      { dimension: 'knowledge_coverage', name: '知识点覆盖', fn: this.checkKnowledgeCoverage },
+      { dimension: 'expression_consistency', name: '可读性检查', fn: this.checkReadability },
+      { dimension: 'expression_consistency', name: '句子衔接', fn: this.checkSentenceCohesion },
+      { dimension: 'expression_consistency', name: '语法问题', fn: this.checkGrammarIssues },
+    ];
   }
 
-  const coreTokens = tokenize(coreMessage);
-  const contentTokens = tokenize(content);
-  const contentSet = new Set(contentTokens.map((t) => t.toLowerCase()));
-  const covered = coreTokens.filter((t) => contentSet.has(t.toLowerCase()));
-  const coverage = coreTokens.length > 0 ? covered.length / coreTokens.length : 0;
+  // =======================================================================
+  // Check 1: Completeness — is content present and above minimum length?
+  // =======================================================================
+  private checkCompleteness = (
+    content: string,
+    context: Record<string, unknown>,
+  ): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
 
-  if (coverage >= 0.8) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'intent_satisfaction',
-      severity: 'pass',
-      description: `核心信息覆盖率 ${Math.round(coverage * 100)}%，意图满足度良好。`,
-    });
-  } else if (coverage >= 0.5) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'intent_satisfaction',
-      severity: 'warning',
-      description: `核心信息覆盖率 ${Math.round(coverage * 100)}%，部分意图未充分表达。`,
-      suggestion:
-        '检查以下关键词是否被覆盖：' +
-        coreTokens.filter((t) => !contentSet.has(t.toLowerCase())).join('、'),
-    });
-  } else {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'intent_satisfaction',
-      severity: 'blocking',
-      description: `核心信息覆盖率仅 ${Math.round(coverage * 100)}%，意图未充分传达。`,
-      suggestion: '建议重写以确保核心信息在文中得到充分阐述。',
-    });
-  }
-
-  return issues;
-}
-
-// 2. Knowledge Coverage
-function checkKnowledgeCoverage(state: PCSState, content: string): ReviewIssue[] {
-  const issues: ReviewIssue[] = [];
-  const requiredTopics = state.knowledge.required_topics;
-  const missingInfo = state.knowledge.missing_information;
-
-  if (requiredTopics.length === 0 && missingInfo.length === 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'knowledge_coverage',
-      severity: 'pass',
-      description: '无知识覆盖要求或所有知识点已覆盖。',
-    });
-    return issues;
-  }
-
-  let uncoveredCount = 0;
-  for (const rt of requiredTopics) {
-    if (!rt.covered && !content.toLowerCase().includes(rt.topic.toLowerCase())) {
-      uncoveredCount += 1;
-    }
-  }
-
-  if (uncoveredCount === 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'knowledge_coverage',
-      severity: 'pass',
-      description: `所有 ${requiredTopics.length} 个知识点均已覆盖。`,
-    });
-  } else {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'knowledge_coverage',
-      severity: uncoveredCount > 2 ? 'blocking' : 'warning',
-      description: `有 ${uncoveredCount} 个必要知识点未被覆盖。`,
-      suggestion:
-        '请补充以下知识点：' +
-        requiredTopics
-          .filter((rt) => !rt.covered && !content.toLowerCase().includes(rt.topic.toLowerCase()))
-          .map((rt) => rt.topic)
-          .join('、'),
-    });
-  }
-
-  return issues;
-}
-
-// 3. Constraint Compliance (delegates to constraint-checker)
-async function checkConstraintCompliance(state: PCSState, content: string): Promise<ReviewIssue[]> {
-  // Aggregate section-level constraint checks
-  const allIssues: ReviewIssue[] = [];
-
-  for (const section of state.structure.sections) {
-    const result = checkConstraints(section.content_draft || content, state, section.id);
-    // Remap expression_consistency dimension to constraint_compliance
-    const remapped = result.issues.map((issue) => ({
-      ...issue,
-      dimension: 'constraint_compliance' as ReviewDimension,
-    }));
-    allIssues.push(...remapped);
-  }
-
-  // Global constraint check
-  const globalResult = checkConstraints(content, state, 'global');
-  const globalRemapped = globalResult.issues.map((issue) => ({
-    ...issue,
-    dimension: 'constraint_compliance' as ReviewDimension,
-  }));
-  allIssues.push(...globalRemapped);
-
-  if (allIssues.length === 0) {
-    allIssues.push({
-      id: nextIssueId(),
-      dimension: 'constraint_compliance',
-      severity: 'pass',
-      description: '所有约束合规检查通过。',
-    });
-  }
-
-  return allIssues;
-}
-
-// 4. Expression Consistency
-function checkExpressionConsistency(state: PCSState, content: string): ReviewIssue[] {
-  const issues: ReviewIssue[] = [];
-  const avoidList: string[] = state.expression.avoid.value;
-
-  // Check avoid list
-  const violations: string[] = [];
-  for (const term of avoidList) {
-    if (term.length > 0 && content.includes(term)) {
-      violations.push(term);
-    }
-  }
-
-  if (violations.length > 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'expression_consistency',
-      severity: 'blocking',
-      description: `内容包含 ${violations.length} 个禁止项：${violations.join('、')}`,
-      suggestion: '请移除或替换上述禁止项。',
-    });
-  }
-
-  // Check tone consistency (simple heuristic: paragraph length variation)
-  const paragraphs = content.split(/\n\n+/).filter((p) => p.trim().length > 0);
-  if (paragraphs.length >= 3) {
-    const lengths = paragraphs.map((p) => p.length);
-    const avg = lengths.reduce((a, b) => a + b, 0) / lengths.length;
-    const maxDev = Math.max(...lengths.map((l) => Math.abs(l - avg)));
-    if (maxDev > avg * 2) {
+    if (!content || content.length < 50) {
       issues.push({
-        id: nextIssueId(),
-        dimension: 'expression_consistency',
-        severity: 'warning',
-        description: '段落长度差异较大，表达节奏可能不一致。',
-        suggestion: '建议统一段落长度以保持表达节奏稳定。',
+        id: 'rev-comp-1',
+        dimension: 'structure_completeness',
+        severity: 'blocking',
+        description: '内容为空或过短（<50字），请完成写作',
+        location: context.nodeId as string,
+        suggestion: '使用 /gen 让AI生成初稿，或直接输入内容',
       });
     }
-  }
 
-  if (issues.length === 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'expression_consistency',
-      severity: 'pass',
-      description: '表达一致性检查通过。',
-    });
-  }
-
-  return issues;
-}
-
-// 5. Structure Completeness
-function checkStructureCompleteness(state: PCSState, _content: string): ReviewIssue[] {
-  const issues: ReviewIssue[] = [];
-  const sections = state.structure.sections;
-
-  if (sections.length === 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'structure_completeness',
-      severity: 'blocking',
-      description: '文章结构为空，尚未生成大纲。',
-    });
     return issues;
-  }
+  };
 
-  const emptySections = sections.filter(
-    (s) => !s.content_draft || s.content_draft.trim().length === 0,
-  );
-  const incompleteSections = sections.filter(
-    (s) => s.draft_state !== 'approved' && s.draft_state !== 'locked',
-  );
+  // =======================================================================
+  // Check 2: Intent Alignment — does the content relate to the goal?
+  // =======================================================================
+  private checkIntentAlignment = (
+    content: string,
+    context: Record<string, unknown>,
+  ): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
+    const goal = (context.goal as string) || '';
 
-  if (emptySections.length > 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'structure_completeness',
-      severity: 'blocking',
-      description: `有 ${emptySections.length} 个章节内容为空：${emptySections.map((s) => s.title).join('、')}`,
-      suggestion: '请为所有空章节生成内容。',
-    });
-  }
+    if (!goal || !content) return issues;
 
-  if (incompleteSections.length > 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'structure_completeness',
-      severity: 'warning',
-      description: `有 ${incompleteSections.length} 个章节尚未完成审核：${incompleteSections.map((s) => s.title).join('、')}`,
-    });
-  }
+    // Simple keyword overlap between goal tokens and content
+    const goalKeywords = goal.split(/[\s，。、；：""''！？\n]+/).filter((w) => w.length > 1);
+    if (goalKeywords.length === 0) return issues;
 
-  if (issues.length === 0) {
-    issues.push({
-      id: nextIssueId(),
-      dimension: 'structure_completeness',
-      severity: 'pass',
-      description: '所有章节已完成并通过审核。',
-    });
-  }
-
-  return issues;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function assembleFullContent(state: PCSState): string {
-  const parts: string[] = [];
-  for (const section of state.structure.sections) {
-    if (section.content_draft && section.content_draft.trim().length > 0) {
-      parts.push(`## ${section.title}\n\n${section.content_draft}`);
+    let matchCount = 0;
+    for (const kw of goalKeywords) {
+      if (content.includes(kw)) matchCount++;
     }
-  }
-  return parts.join('\n\n');
-}
+    const ratio = matchCount / goalKeywords.length;
 
-function buildIntentSummary(state: PCSState): string {
-  return [
-    `目的: ${state.intent.purpose.value || '未指定'}`,
-    `核心信息: ${state.intent.core_message.value || '未指定'}`,
-    `预期影响: ${state.intent.desired_impact.value || '未指定'}`,
-    `目标情感: ${state.intent.target_emotion.value || '未指定'}`,
-  ].join('\n');
-}
+    if (ratio < 0.3) {
+      issues.push({
+        id: 'rev-intent-1',
+        dimension: 'intent_satisfaction',
+        severity: 'warning',
+        description: `内容与目标"${goal.slice(0, 30)}..."关联较弱（关键词覆盖 ${Math.round(ratio * 100)}%）`,
+        suggestion: '检查本节内容是否偏离了原始目标，或考虑更新目标描述',
+      });
+    }
 
-function buildKnowledgeSummary(state: PCSState): string {
-  const topics = state.knowledge.required_topics;
-  if (topics.length === 0) return '无特定知识要求。';
-  return topics
-    .map((t) => `- ${t.topic} [${t.covered ? '已覆盖' : '未覆盖'}] (章节: ${t.section_id})`)
-    .join('\n');
-}
+    return issues;
+  };
 
-function buildConstraintSummary(state: PCSState): string {
-  return [
-    `类型: ${state.constraint.type.value || '未指定'}`,
-    `平台: ${state.constraint.platform.value || '未指定'}`,
-    `格式: ${state.constraint.format.value || '未指定'}`,
-    `字数范围: ${state.constraint.length_min.value || 0}–${state.constraint.length_max.value || '不限'}`,
-    `截止日期: ${state.constraint.deadline.value || '无'}`,
-    `自定义约束: ${state.constraint.custom_constraints.value.join('、') || '无'}`,
-  ].join('\n');
-}
+  // =======================================================================
+  // Check 3: Length Constraint — does the content match the target length?
+  // =======================================================================
+  private checkLengthConstraint = (
+    content: string,
+    context: Record<string, unknown>,
+  ): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
+    const targetLength = (context.targetLength as number) || 0;
 
-function buildExpressionSummary(state: PCSState): string {
-  return [
-    `语气: ${state.expression.tone.value || '未指定'}`,
-    `声音: ${state.expression.voice.value || '未指定'}`,
-    `避免: ${state.expression.avoid.value.join('、') || '无'}`,
-    `风格参考: ${state.expression.style_reference.value || '无'}`,
-  ].join('\n');
-}
+    if (!targetLength || !content) return issues;
 
-function buildStructureSummary(state: PCSState): string {
-  return state.structure.sections
-    .map((s) => `- [${s.order}] ${s.title} (${s.function}, ${s.draft_state}): ${s.goal}`)
-    .join('\n');
-}
+    const actualLength = content.length;
+    const ratio = actualLength / targetLength;
 
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
-    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .trim();
+    if (ratio > 1.5) {
+      issues.push({
+        id: 'rev-len-1',
+        dimension: 'constraint_compliance',
+        severity: 'warning',
+        description: `内容过长：${actualLength}字（目标 ${targetLength}字，超出 ${Math.round((ratio - 1) * 100)}%）`,
+        suggestion: '考虑精简内容，或将部分内容拆分到其他章节',
+      });
+    } else if (ratio < 0.5 && actualLength > 0) {
+      issues.push({
+        id: 'rev-len-2',
+        dimension: 'constraint_compliance',
+        severity: 'warning',
+        description: `内容偏短：${actualLength}字（目标 ${targetLength}字）`,
+        suggestion: '考虑展开论述，增加案例或数据支撑',
+      });
+    }
+
+    return issues;
+  };
+
+  // =======================================================================
+  // Check 4: Style Consistency — any avoid-list violations?
+  // =======================================================================
+  private checkStyleConsistency = (
+    content: string,
+    context: Record<string, unknown>,
+  ): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
+    const avoidList = (context.avoidList as string[]) || [];
+
+    if (!content) return issues;
+
+    for (const term of avoidList) {
+      if (term && content.includes(term)) {
+        issues.push({
+          id: `rev-style-${term}`,
+          dimension: 'expression_consistency',
+          severity: 'blocking',
+          description: `内容包含禁止项："${term}"`,
+          suggestion: `请移除或替换"${term}"`,
+        });
+      }
+    }
+
+    return issues;
+  };
+
+  // =======================================================================
+  // Check 5: Knowledge Coverage — are all required topics present?
+  // =======================================================================
+  private checkKnowledgeCoverage = (
+    content: string,
+    context: Record<string, unknown>,
+  ): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
+    const requiredTopics = (context.requiredTopics as string[]) || [];
+
+    if (!content) return issues;
+
+    for (const topic of requiredTopics) {
+      if (topic && !content.includes(topic)) {
+        issues.push({
+          id: `rev-cov-${topic}`,
+          dimension: 'knowledge_coverage',
+          severity: 'warning',
+          description: `缺失知识点："${topic}"`,
+          suggestion: `请在本节中添加关于"${topic}"的内容`,
+        });
+      }
+    }
+
+    return issues;
+  };
+
+  // =======================================================================
+  // Check 6: Readability — sentence length compared to audience threshold
+  // =======================================================================
+  private checkReadability = (content: string, context: Record<string, unknown>): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
+
+    if (!content) return issues;
+
+    const sentences = content.split(/[。！？.!?]+/).filter((s) => s.trim().length > 0);
+    if (sentences.length < 3) return issues;
+
+    const avgLen = sentences.reduce((sum, sent) => sum + sent.length, 0) / sentences.length;
+    const longSentences = sentences.filter((s) => s.length > 60);
+    const targetAudience = (context.targetAudience as string) || '普通读者';
+
+    // Audience-specific thresholds (avg sentence length)
+    const thresholds: Record<string, number> = {
+      入门: 30,
+      普通读者: 40,
+      中级: 50,
+      专家: 70,
+    };
+    const maxAvg = thresholds[targetAudience] ?? 40;
+
+    if (avgLen > maxAvg) {
+      issues.push({
+        id: 'rev-read-1',
+        dimension: 'expression_consistency',
+        severity: 'warning',
+        description: `平均句长 ${Math.round(avgLen)} 字，超过目标读者"${targetAudience}"的建议上限 ${maxAvg} 字`,
+        suggestion: `将 ${longSentences.length} 个长句拆分为短句，提高可读性`,
+      });
+    }
+
+    return issues;
+  };
+
+  // =======================================================================
+  // Check 7: Sentence Cohesion — adjacent-sentence word overlap
+  // =======================================================================
+  private checkSentenceCohesion = (
+    content: string,
+    _context: Record<string, unknown>,
+  ): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
+
+    if (!content) return issues;
+
+    const sentences = content.split(/[。！？.!?]+/).filter((s) => s.trim().length > 5);
+    if (sentences.length < 3) return issues;
+
+    let lowFlowCount = 0;
+
+    for (let i = 0; i < sentences.length - 1; i++) {
+      const words1 = new Set(
+        sentences[i].split(/[\s，、；：""''！？\n]+/).filter((w) => w.length > 1),
+      );
+      const words2 = new Set(
+        sentences[i + 1].split(/[\s，、；：""''！？\n]+/).filter((w) => w.length > 1),
+      );
+
+      if (words1.size === 0 || words2.size === 0) continue;
+
+      let overlap = 0;
+      for (const w of Array.from(words1)) {
+        if (words2.has(w)) overlap++;
+      }
+
+      const similarity = overlap / Math.max(words1.size, words2.size);
+      if (similarity < 0.1) lowFlowCount++;
+    }
+
+    const totalPairs = sentences.length - 1;
+
+    if (lowFlowCount / totalPairs > 0.3) {
+      issues.push({
+        id: 'rev-cohesion-1',
+        dimension: 'expression_consistency',
+        severity: 'warning',
+        description: `${lowFlowCount}/${totalPairs} 处句子衔接较弱，可能导致阅读跳跃`,
+        suggestion: '在低衔接处增加过渡词（此外、然而、因此、具体来说）',
+      });
+    }
+
+    return issues;
+  };
+
+  // =======================================================================
+  // Check 8: Grammar Issues — common Chinese writing problems
+  // =======================================================================
+  private checkGrammarIssues = (
+    content: string,
+    _context: Record<string, unknown>,
+  ): ReviewIssue[] => {
+    const issues: ReviewIssue[] = [];
+
+    if (!content) return issues;
+
+    // Detect repeated punctuation (typo indicator)
+    const repeated = content.match(/([。！？，、])\1{2,}/g);
+    if (repeated) {
+      issues.push({
+        id: 'rev-gram-1',
+        dimension: 'expression_consistency',
+        severity: 'warning',
+        description: `检测到 ${repeated.length} 处可能的标点重复`,
+        suggestion: '检查是否有多余的标点符号',
+      });
+    }
+
+    // Detect overlong paragraphs (>500 chars without line break)
+    const paragraphs = content.split(/\n+/);
+    const longParas = paragraphs.filter((p) => p.length > 500);
+    if (longParas.length > 0) {
+      issues.push({
+        id: 'rev-gram-2',
+        dimension: 'expression_consistency',
+        severity: 'warning',
+        description: `${longParas.length} 个段落过长（>500字），建议分段`,
+        suggestion: '在逻辑断点处增加换行，改善阅读节奏',
+      });
+    }
+
+    return issues;
+  };
 }
