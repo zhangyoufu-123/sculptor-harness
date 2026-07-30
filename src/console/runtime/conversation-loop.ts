@@ -11,7 +11,7 @@
 import * as readline from 'readline';
 import { PCSManager } from '@/pcs/pcs-manager';
 import { createPCSState, createMockField } from '@/test/mocks/pcs-factory';
-import type { PCSState, StructureSection, DraftState, NodeFunction } from '@/pcs/types';
+import type { PCSState, StructureSection } from '@/pcs/types';
 import { artifactBuilder } from '@/discovery/artifact-builder';
 import { understandWithLLM, type LLMUnderstandingResult } from '@/runtime/intent/llm-understander';
 import {
@@ -57,27 +57,6 @@ interface ConsoleSession {
   understandingResult: LLMUnderstandingResult | null;
   beliefState: BeliefState | null;
 }
-
-// =========================================================================
-// =========================================================================
-// Blueprint (preset sections, adjustable)
-// =========================================================================
-
-interface BlueprintItem {
-  id: string;
-  title: string;
-  goal: string;
-  func: NodeFunction;
-  hard: 'hard' | 'soft';
-}
-
-const BLUEPRINT: BlueprintItem[] = [
-  { id: 'n1', title: '引言', goal: '建立读者对AI教育趋势的认知', func: 'introduce', hard: 'hard' },
-  { id: 'n2', title: '技术分析', goal: '解释关键AI技术及教育应用', func: 'argument', hard: 'hard' },
-  { id: 'n3', title: '案例研究', goal: '提供真实AI教育成功案例', func: 'evidence', hard: 'soft' },
-  { id: 'n4', title: '挑战与风险', goal: '客观呈现限制和风险', func: 'counter', hard: 'hard' },
-  { id: 'n5', title: '结论与建议', goal: '给出可执行的行动建议', func: 'conclude', hard: 'hard' },
-];
 
 // =========================================================================
 // Mock content by section title
@@ -238,47 +217,59 @@ export function startConversationLoop(): void {
     session.manager?.transitionTo('structured');
     trace('PHASE', 'clarifying → structured');
 
-    // Show summary
-    say('\n你的创作画像：');
-    say(`  目的：${session.manager?.getField('intent.purpose')}`);
-    say(`  观点：${session.manager?.getField('intent.core_message')}`);
-    say(`  风格：${session.manager?.getField('expression.tone')}`);
-    say(`  读者：${session.manager?.getField('audience.audience_type')}`);
-    say(`  格式：${session.manager?.getField('constraint.format')}`);
+    // Read from Belief State — the SINGLE source of truth
+    const belief = session.beliefState;
+    const uResult = session.understandingResult;
 
-    // Enter blueprint
+    // Determine creative type from belief state, NOT from hardcoded defaults
+    const artifactType =
+      belief?.artifactBeliefs[0]?.type || uResult?.understanding?.artifactType || '文章';
+    const topic =
+      belief?.topicBeliefs.map((t) => t.topic).join('、') || uResult?.understanding?.topic || '';
+
+    trace('BELIEF', `Blueprint input: ${artifactType} / ${topic}`);
+
+    // Clear ALL old defaults — write what we ACTUALLY know
+    if (session.manager) {
+      session.manager.writeField('intent.purpose', topic, 'user');
+      if (uResult?.understanding?.summary) {
+        session.manager.writeField('intent.core_message', uResult.understanding.summary, 'user');
+      }
+    }
+
+    // Show summary from actual understanding
+    say('\n你的创作画像：');
+    say(`  类型：${artifactType}`);
+    say(`  主题：${topic}`);
+    if (belief) {
+      say(`  理解度：${Math.round(belief.overallConfidence * 100)}%`);
+      say(`  交互：${belief.interactionCount} 轮`);
+    }
+
     session.phase = 'blueprint';
-    enterBlueprint();
+    enterBlueprint(artifactType, topic);
   }
 
   // =========================================================================
   // Phase: Blueprint
   // =========================================================================
 
-  function enterBlueprint(): void {
-    session.sections = BLUEPRINT.map((s, i): StructureSection => ({
-      id: s.id,
-      title: s.title,
-      goal: s.goal,
-      function: s.func,
-      hardness: s.hard,
-      draft_state: 'empty' as DraftState,
-      content_draft: '',
-      pcs_status: 'confirmed' as const,
-      source: 'ai',
-      confidence: 0.9,
-      order: i,
-    }));
-    trace('STRUCTURE', `${session.sections.length} sections generated`);
+  function enterBlueprint(artifactType: string, topic: string): void {
+    // Generate sections based on ACTUAL creative type, not hardcoded AI教育
+    const sections = generateSectionsForType(artifactType, topic);
+    session.sections = sections;
+
+    trace('STRUCTURE', `${sections.length} sections for ${artifactType}`);
+    trace('STRUCTURE', `Topic: ${topic}`);
 
     divider('📐 大纲工坊');
     say('');
-    session.sections.forEach((s, i) => {
+    sections.forEach((s, i) => {
       const icon = s.hardness === 'hard' ? '🔒' : '📝';
       say(`  ${i + 1}. ${icon} ${s.title}`);
       say(`     ${s.goal}`);
     });
-    say('\n操作: A=确认进入写作  1-5=编辑章节  +=新增  -=删除');
+    say('\n操作: A=确认进入写作  1-5=编辑章节');
     prompt();
   }
 
@@ -646,4 +637,202 @@ export function startConversationLoop(): void {
   rl.on('close', () => process.exit(0));
 
   enterWelcome();
+
+  // =========================================================================
+  // Section Generator — maps artifact type to blueprint sections
+  // =========================================================================
+
+  function generateSectionsForType(artifactType: string, topic: string): StructureSection[] {
+    const topicShort = topic.length > 20 ? topic.slice(0, 20) : topic;
+
+    // Prose/散文 structure
+    if (
+      artifactType === '散文' ||
+      artifactType === 'prose' ||
+      topic.includes('散文') ||
+      topic.includes('感悟')
+    ) {
+      return [
+        {
+          id: 'n1',
+          title: '启程：离开日常',
+          goal: `描述出发的动机和心境 — 为什么要独自走入山林？`,
+          function: 'introduce',
+          hardness: 'hard',
+          order: 0,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+        {
+          id: 'n2',
+          title: '融入：山林体验',
+          goal: `记录在自然中的感官体验和内心变化`,
+          function: 'argument',
+          hardness: 'hard',
+          order: 1,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+        {
+          id: 'n3',
+          title: '反思：独处的意义',
+          goal: `从个人体验上升到对孤独、自由、人生的思考`,
+          function: 'argument',
+          hardness: 'hard',
+          order: 2,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+        {
+          id: 'n4',
+          title: '回归：带回的礼物',
+          goal: `描述回到社会后的变化 — 这场旅程改变了什么？`,
+          function: 'conclude',
+          hardness: 'hard',
+          order: 3,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+      ];
+    }
+
+    // Novel structure
+    if (artifactType === '小说' || artifactType === 'novel') {
+      return [
+        {
+          id: 'n1',
+          title: '开篇：世界的裂缝',
+          goal: `建立故事世界，引入主人公和核心冲突`,
+          function: 'introduce',
+          hardness: 'hard',
+          order: 0,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+        {
+          id: 'n2',
+          title: '发展：冲突升级',
+          goal: `深化冲突，揭示角色动机`,
+          function: 'argument',
+          hardness: 'hard',
+          order: 1,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+        {
+          id: 'n3',
+          title: '转折：关键选择',
+          goal: `角色面临关键抉择，故事方向改变`,
+          function: 'counter',
+          hardness: 'hard',
+          order: 2,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+        {
+          id: 'n4',
+          title: '高潮：最终对抗',
+          goal: `冲突达到顶点，核心主题浮现`,
+          function: 'argument',
+          hardness: 'hard',
+          order: 3,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+        {
+          id: 'n5',
+          title: '结局：新的平衡',
+          goal: `故事收束，展现角色和世界的变化`,
+          function: 'conclude',
+          hardness: 'hard',
+          order: 4,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        },
+      ];
+    }
+
+    // Default: generic essay/article
+    return [
+      {
+        id: 'n1',
+        title: '引言',
+        goal: `围绕"${topicShort}"建立读者认知`,
+        function: 'introduce',
+        hardness: 'hard',
+        order: 0,
+        draft_state: 'empty',
+        content_draft: '',
+        pcs_status: 'confirmed',
+        source: 'ai',
+        confidence: 0.9,
+      },
+      {
+        id: 'n2',
+        title: '主体一',
+        goal: `展开第一个核心论点`,
+        function: 'argument',
+        hardness: 'hard',
+        order: 1,
+        draft_state: 'empty',
+        content_draft: '',
+        pcs_status: 'confirmed',
+        source: 'ai',
+        confidence: 0.9,
+      },
+      {
+        id: 'n3',
+        title: '主体二',
+        goal: `展开第二个核心论点或提供案例`,
+        function: 'evidence',
+        hardness: 'soft',
+        order: 2,
+        draft_state: 'empty',
+        content_draft: '',
+        pcs_status: 'confirmed',
+        source: 'ai',
+        confidence: 0.9,
+      },
+      {
+        id: 'n4',
+        title: '结论',
+        goal: `总结并呼应引言`,
+        function: 'conclude',
+        hardness: 'hard',
+        order: 3,
+        draft_state: 'empty',
+        content_draft: '',
+        pcs_status: 'confirmed',
+        source: 'ai',
+        confidence: 0.9,
+      },
+    ];
+  }
 }

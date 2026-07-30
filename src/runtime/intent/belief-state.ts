@@ -122,6 +122,22 @@ function seedUncertainties(idea: string): Uncertainty[] {
     category: 'audience',
   });
 
+  // Add topic-specific uncertainties based on the idea content
+  if (
+    idea.includes('山林') ||
+    idea.includes('自然') ||
+    idea.includes('独') ||
+    idea.includes('旅行')
+  ) {
+    uncertainties.push({
+      question: '这次经历中，最触动你的是什么？是什么让你决定写下这些感悟？',
+      informationGain: 0.9,
+      impact: 0.9,
+      asked: false,
+      category: 'direction',
+    });
+  }
+
   return uncertainties;
 }
 
@@ -156,6 +172,44 @@ export function updateBelief(
       existing.confidence = Math.min(existing.confidence + 0.1, 1.0);
     } else if (word.length >= 2) {
       state.topicBeliefs.push({ topic: word, confidence: 0.5, subtopics: [] });
+    }
+  }
+
+  // Update artifact beliefs based on user answer
+  const artifactKeywords: Record<string, string> = {
+    散文: '散文',
+    随笔: '散文',
+    杂文: '散文',
+    小说: '小说',
+    故事: '小说',
+    叙事: '小说',
+    论文: '学术论文',
+    研究: '学术论文',
+    文章: '文章',
+    博客: '博客',
+    公众号: '博客',
+    诗: '诗歌',
+    诗歌: '诗歌',
+    报告: '报告',
+    教程: '教程',
+  };
+
+  for (const [keyword, artifactType] of Object.entries(artifactKeywords)) {
+    if (userAnswer.includes(keyword)) {
+      // Replace existing beliefs — user explicitly stated the type
+      const existing = state.artifactBeliefs.find((a) => a.type === artifactType);
+      if (existing) {
+        existing.confidence = 0.95; // User explicitly stated — high confidence
+      } else {
+        // Clear old low-confidence beliefs
+        state.artifactBeliefs = state.artifactBeliefs.filter((a) => a.confidence > 0.7);
+        state.artifactBeliefs.push({
+          type: artifactType,
+          confidence: 0.95,
+          signals: [`用户明确提到"${keyword}"`],
+        });
+      }
+      break; // Only match one artifact type
     }
   }
 
