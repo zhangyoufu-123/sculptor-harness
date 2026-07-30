@@ -56,6 +56,11 @@ async function main() {
 
     // Check if ready for writing phase
     const state = _orchestrator!.getState();
+    if (state.phase === 'outline' && state.outline.length > 0) {
+      console.log('\n📐 已生成大纲:');
+      state.outline.forEach((s, i) => console.log(`  ${i + 1}. ${s.title} — ${s.goal}`));
+      console.log('\n输入 "确认" 开始写作，或提出修改意见。');
+    }
     if (state.phase === 'writing') {
       console.log('\n进入写作阶段...');
       rl.close();
@@ -63,7 +68,12 @@ async function main() {
       return;
     }
 
-    rl.prompt();
+    // Guard: don't prompt on closed readline (piped input)
+    try {
+      rl.prompt();
+    } catch {
+      /* piped input — ignore */
+    }
   });
 }
 
