@@ -20,6 +20,7 @@ export interface GenerationInput {
   tone: string;
   previousContent?: string;
   nextSectionTitle?: string;
+  creativeContext?: string;
 }
 
 export interface GenerationOutput {
@@ -46,11 +47,12 @@ const GENERATION_PROMPT = `你是专业写作者。根据上下文为指定章�
 
 export async function generateContent(input: GenerationInput): Promise<GenerationOutput> {
   const prompt = `章节: ${input.sectionTitle}
-目标: ${input.sectionGoal}
-类型: ${input.artifactType}
-主题: ${input.topic}
-读者: ${input.audience}
-语气: ${input.tone}
+ 目标: ${input.sectionGoal}
+ 类型: ${input.artifactType}
+ 主题: ${input.topic}
+ 读者: ${input.audience}
+ 语气: ${input.tone}
+ ${input.creativeContext ? `创作上下文: ${input.creativeContext}` : ''}
 ${input.previousContent ? `前文: ${input.previousContent.slice(-100)}` : ''}
 ${input.nextSectionTitle ? `下一节: ${input.nextSectionTitle}` : ''}`;
 

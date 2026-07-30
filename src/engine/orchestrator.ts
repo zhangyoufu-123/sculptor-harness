@@ -8,21 +8,22 @@
  * 4. Coordinates the conversation flow
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
 import { LLMClient } from '@/lib/llm-client';
-import {
-  createBeliefState,
-  reviseBelief,
-  getBeliefContext,
-  addUncertainty,
-  recordMisunderstanding,
-  type BeliefState,
-} from '@/runtime/belief-revision';
-import { understandIntent } from '@/skills/intent-understanding';
+import { createBeliefState, getBeliefContext, type BeliefState } from '@/runtime/belief-revision';
 import { planStructure } from '@/skills/structure-planning';
 import { generateContent } from '@/skills/content-generation';
-import { assessCompletion } from '@/runtime/completion-assessor';
+import {
+  generateHypotheses,
+  type CreativeHypothesis,
+} from '@/runtime/discovery/hypothesis-generator';
+import { excavateMemories, type MemoryAsset } from '@/runtime/discovery/memory-excavator';
+import { assessReadiness } from '@/runtime/discovery/creative-director';
+import {
+  extractCreativeAssets,
+  createCreativeMemory,
+  buildWritingContext,
+  type CreativeMemory,
+} from '@/runtime/creative-memory';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -46,6 +47,9 @@ export interface SessionState {
   currentSection: number;
   messages: Array<{ role: string; content: string }>;
   phase: 'discovery' | 'outline' | 'writing' | 'done';
+  hypotheses: CreativeHypothesis[];
+  memories: MemoryAsset[];
+  creativeMemory: CreativeMemory;
 }
 
 // =========================================================================
@@ -54,7 +58,6 @@ export interface SessionState {
 
 export class SculptorOrchestrator {
   private state: SessionState;
-  private promptsDir: string;
 
   constructor(initialIdea: string) {
     this.state = {
@@ -63,25 +66,10 @@ export class SculptorOrchestrator {
       currentSection: 0,
       messages: [],
       phase: 'discovery',
+      hypotheses: [],
+      memories: [],
+      creativeMemory: createCreativeMemory(),
     };
-    this.promptsDir = path.join(process.cwd(), 'prompts');
-  }
-
-  /** Load a prompt from markdown file */
-  private loadPrompt(name: string): string {
-    try {
-      return fs.readFileSync(path.join(this.promptsDir, `${name}.md`), 'utf-8');
-    } catch {
-      return ''; // Fallback: use inline prompt
-    }
-  }
-
-  /** Get conversation history as string */
-  private getHistory(): string {
-    return this.state.messages
-      .slice(-10)
-      .map((m) => `${m.role}: ${m.content}`)
-      .join('\n');
   }
 
   // =========================================================================
@@ -108,71 +96,44 @@ export class SculptorOrchestrator {
   // =========================================================================
 
   private async handleDiscovery(input: string): Promise<string> {
-    // Step 1: Understand intent via skill
-    const understanding = await understandIntent({
-      userInput: input,
-      conversationHistory: this.getHistory(),
-      currentBeliefs: {
-        artifactType: this.state.belief.artifact.value,
-        topic: this.state.belief.topic.value,
-      },
-    });
+    // Step 1: Extract creative assets (metaphors, decisions)
+    extractCreativeAssets(input, this.state.creativeMemory);
 
-    // Step 2: Revise belief based on LLM understanding
-    reviseBelief(
-      this.state.belief,
-      {
-        artifact: understanding.artifactType !== '未知' ? understanding.artifactType : undefined,
-        intent: understanding.purpose !== '未知' ? understanding.purpose : undefined,
-        topic: understanding.topic,
-        audience: understanding.audience !== '未知' ? understanding.audience : undefined,
-        tone: understanding.tone !== '未知' ? understanding.tone : undefined,
-      },
-      `LLM理解: ${understanding.summary}`,
+    // Step 2: Generate competing hypotheses
+    const history = this.state.messages
+      .slice(-8)
+      .map((m) => `${m.role}: ${m.content}`)
+      .join('\n');
+    const hypothesisSet = await generateHypotheses(input, history);
+    this.state.hypotheses = hypothesisSet.hypotheses;
+
+    // Step 3: Excavate memories if we have concrete material
+    if (input.length > 30) {
+      const excavation = await excavateMemories(
+        input,
+        this.state.memories,
+        `主题: ${this.state.belief.topic.value}`,
+      );
+      this.state.memories.push(...excavation.assets.filter((a) => a.confirmed));
+    }
+
+    // Step 4: Assess creative readiness
+    const readiness = assessReadiness(
+      this.state.hypotheses,
+      this.state.memories,
+      this.state.belief.roundCount,
+      this.state.creativeMemory.emotionalArc[0]?.feeling,
     );
 
-    // Add uncertainties from LLM
-    for (const u of understanding.uncertainties || []) {
-      addUncertainty(this.state.belief, {
-        field: 'direction',
-        question: u,
-        importance: 0.7,
-        asked: false,
-      });
-    }
-
-    // Record low-confidence understandings
-    if (understanding.confidence < 0.25) {
-      recordMisunderstanding(
-        this.state.belief,
-        '低置信度理解',
-        understanding.summary,
-        '需更多澄清',
-      );
-    }
-
-    // Step 3: Assess completion quality — not just a simple threshold
-    const assessment = assessCompletion(this.state.belief);
-
-    // Log assessment for debugging
-    if (process.env.DEBUG) {
-      console.log(
-        `  [ASSESS] Score:${Math.round(assessment.overallScore * 100)}% Rec:${assessment.recommendation} Gaps:${assessment.gaps.join(',')}`,
-      );
-    }
-
-    if (
-      assessment.recommendation === 'generate_outline' ||
-      assessment.recommendation === 'proceed_to_writing'
-    ) {
-      // Understanding is sufficient — generate outline
+    // Step 5: If ready for outline, generate it
+    if (readiness.canOutline) {
       const outlineResult = await planStructure({
         artifactType: this.state.belief.artifact.value,
         topic: this.state.belief.topic.value,
         purpose: this.state.belief.intent.value,
         audience: this.state.belief.audience.value,
         tone: this.state.belief.tone.value,
-        summary: getBeliefContext(this.state.belief),
+        summary: `${getBeliefContext(this.state.belief)}\n\n${buildWritingContext(this.state.creativeMemory)}`,
       });
       this.state.outline = outlineResult.sections;
       this.state.phase = 'outline';
@@ -182,30 +143,37 @@ export class SculptorOrchestrator {
       );
     }
 
-    // Not ready yet — ask a focused question targeting the biggest gap
-    const focusGap = assessment.gaps[0] || '创作意图';
-    const prompt = this.loadPrompt('orchestrator');
-    const response = await getLLM().completeWithRetry({
-      systemPrompt: prompt || this.getFallbackDiscoveryPrompt(),
-      prompt: `当前理解:
-${getBeliefContext(this.state.belief)}
+    // Step 6: Not ready — ask the best question based on readiness gaps
+    const focusGap =
+      readiness.recommendation === 'excavate_material'
+        ? '需要更多具体素材和感官细节'
+        : readiness.recommendation === 'explore_meaning'
+          ? '需要明确核心意义和创作方向'
+          : '需要进一步讨论';
 
-理解完成度: ${Math.round(assessment.overallScore * 100)}%
+    const response = await getLLM().completeWithRetry({
+      systemPrompt: '你是创作伙伴。你的任务是与作者共同探索创作意图。',
+      prompt: `当前假设:
+${this.state.hypotheses.map((h, i) => `${i + 1}. ${h.interpretation} (${Math.round(h.confidence * 100)}%)`).join('\n')}
+
+创作素材: ${this.state.memories.length} 条
+${this.state.memories
+  .slice(0, 3)
+  .map((m) => `- ${m.content}`)
+  .join('\n')}
+
+完成度: ${Math.round(readiness.overallScore * 100)}%
 最大缺口: ${focusGap}
-建议继续交互: ${assessment.suggestedRemainingRounds} 轮
 
 用户说: "${input}"
 
-请用自然中文回复。针对"${focusGap}"这个缺口，问一个最有价值的问题。不要问已经知道的信息。`,
+请用自然中文回复。不要问"你想写什么类型"或"你的读者是谁"。
+优先: 挖掘具体素材和感官细节。问最能让用户回忆出画面感的问题。`,
       temperature: 0.7,
       maxTokens: 500,
     });
 
-    return response.text || '我理解了，请继续。';
-  }
-
-  private getFallbackDiscoveryPrompt(): string {
-    return `你是 Sculptor 创作助手。帮助用户明确创作意图。用自然中文对话，问最有价值的问题。当理解足够清晰时，建议生成大纲。`;
+    return response.text || hypothesisSet.bestQuestion || '请继续说说你的想法。';
   }
 
   // =========================================================================
@@ -213,6 +181,24 @@ ${getBeliefContext(this.state.belief)}
   // =========================================================================
 
   private async handleOutline(input: string): Promise<string> {
+    if (
+      input.includes('不行') ||
+      input.includes('不对') ||
+      input.includes('重新') ||
+      input.includes('再讨论')
+    ) {
+      const response = await getLLM().completeWithRetry({
+        systemPrompt: '你是创作顾问。当用户对大纲不满意时，你先分析原因，再提出方向。',
+        prompt: `用户对大纲不满意: "${input}"
+当前大纲: ${this.state.outline.map((s, i) => `${i + 1}. ${s.title} — ${s.goal}`).join('\n')}
+创作记忆: ${buildWritingContext(this.state.creativeMemory)}
+请分析用户可能不满意的原因，提出2-3个更接近用户意图的方向。`,
+        temperature: 0.5,
+        maxTokens: 500,
+      });
+      return response.text || '我理解了你的不满意。能告诉我具体哪里不符合你的想法吗？';
+    }
+
     if (
       input.includes('确认') ||
       input.includes('开始') ||
@@ -266,6 +252,7 @@ ${getBeliefContext(this.state.belief)}
         tone: this.state.belief.tone.value,
         previousContent: prevContent,
         nextSectionTitle: nextTitle,
+        creativeContext: buildWritingContext(this.state.creativeMemory),
       });
 
       section.content = result.content;
