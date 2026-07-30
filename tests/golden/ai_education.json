@@ -1,0 +1,41 @@
+{
+  "name": "AI教育 — Golden Test",
+  "description": "Full pipeline test: Idea → Clarify → Blueprint → Write → Reflect → Revise → Export",
+  "input": {
+    "idea": "写一篇关于AI如何改变教育行业的文章",
+    "clarification": {
+      "purpose": "论证AI教育的必要性和紧迫性",
+      "core_message": "AI不会替代教师，但会重塑教育产业链",
+      "tone": "专业分析型",
+      "audience_type": "教育从业者",
+      "format": "公众号文章",
+      "length_min": 2000,
+      "length_max": 3000
+    }
+  },
+  "expected": {
+    "phases": ["initializing", "clarifying", "structured", "executing", "reviewing", "completed"],
+    "min_sections": 4,
+    "max_sections": 7,
+    "expected_section_titles": ["引言", "技术", "案例", "挑战", "结论"],
+    "checks": {
+      "all_sections_drafted": true,
+      "intent_confirmed": true,
+      "audience_confirmed": true,
+      "phase_completed": true,
+      "no_locked_field_violations": true
+    }
+  },
+  "trace_requirements": {
+    "must_contain_events": ["PROJECT_INITIALIZED", "NODE_STARTED", "NODE_APPROVED"],
+    "must_contain_phases": [
+      "initializing",
+      "clarifying",
+      "structured",
+      "executing",
+      "reviewing",
+      "completed"
+    ],
+    "max_duration_ms": 30000
+  }
+}

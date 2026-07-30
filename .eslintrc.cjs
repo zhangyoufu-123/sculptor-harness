@@ -19,4 +19,14 @@ module.exports = {
     '@typescript-eslint/explicit-function-return-type': 'off',
     'no-console': ['warn', { allow: ['warn', 'error'] }],
   },
+  overrides: [
+    {
+      // CLI files use console for terminal output
+      files: ['src/cli/**/*.ts'],
+      rules: {
+        'no-console': 'off',
+        '@typescript-eslint/no-explicit-any': 'off',
+      },
+    },
+  ],
 };
