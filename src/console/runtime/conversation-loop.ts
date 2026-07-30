@@ -16,6 +16,9 @@ import { classifyCreativeType, CREATIVE_TYPE_LABELS } from '@/runtime/creative-t
 import { getClarificationSchema } from '@/runtime/clarification-schemas';
 import type { ClarifyDimension } from '@/runtime/clarification-schemas';
 import type { CreativeType } from '@/runtime/creative-type-router';
+import { classifyProject } from '@/discovery/project-classifier';
+import { artifactBuilder } from '@/discovery/artifact-builder';
+import { analyzeInput } from '@/discovery/conversation-analyzer';
 
 // =========================================================================
 // Types
@@ -192,6 +195,19 @@ export function startConversationLoop(): void {
     session.clarifyDims = schema.dimensions;
     trace('SCHEMA', `Loaded: ${schema.type} — ${session.clarifyDims.length} dimensions`);
 
+    // Full project classification
+    const classification = classifyProject(idea);
+    trace(
+      'CLASSIFY',
+      `Maturity: ${classification.maturity} | Workflow: ${classification.workflow}`,
+    );
+    trace('CLASSIFY', `Known: ${classification.knowns.join(', ') || '无'}`);
+    trace('CLASSIFY', `Unknown: ${classification.unknowns.join(', ') || '无'}`);
+
+    // Create initial artifact
+    const artifact = artifactBuilder.createIdeaArtifact(idea, classification);
+    trace('ARTIFACT', `Stage: ${artifact.stage} → ${artifact.conversationSummary.slice(0, 80)}`);
+
     say(`\n收到："${idea}"`);
     say(`\n${typeLabel.emoji} 我理解：你想创作一个 ${typeLabel.label}`);
     if (routing.signals.length > 0) {
@@ -233,6 +249,17 @@ export function startConversationLoop(): void {
     // Write to PCS
     const result = session.manager.writeField(dim.field, value, 'user');
     trace('FIELD', `${dim.field} = "${value}" ${result.success ? '✓' : '✗'}`);
+
+    // Analyze input type
+    const analysis = analyzeInput(input, session.messages);
+    if (analysis.class !== 'new_info' && analysis.class !== 'affirmation') {
+      trace(
+        'INPUT',
+        `Classified as: ${analysis.class} (${Math.round(analysis.confidence * 100)}%)`,
+      );
+      if (analysis.correctsField) trace('CORRECT', `Field: ${analysis.correctsField}`);
+      if (analysis.conflictsWith) trace('CONFLICT', `With: ${analysis.conflictsWith}`);
+    }
 
     addMessage('assistant', `${dim.label}: ${value}`);
     say(`  ✅ ${dim.label} → ${value}`);
@@ -452,6 +479,25 @@ export function startConversationLoop(): void {
       session.nodeContents = {};
       session.messages = [];
       enterWelcome();
+      return;
+    }
+    if (input === '/trace') {
+      const latest = artifactBuilder.getLatest();
+      if (latest) {
+        divider('📋 Discovery Trace');
+        say(`阶段: ${latest.stage}`);
+        say(
+          `类型: ${latest.classification.type} (${Math.round(latest.classification.confidence * 100)}%)`,
+        );
+        say(`成熟度: ${latest.classification.maturity}`);
+        say(`已发现: ${Object.keys(latest.discovered).length} 项`);
+        say(`待探索: ${latest.unknowns.join(', ') || '无'}`);
+        say(`\n${latest.conversationSummary}`);
+        divider();
+      } else {
+        say('暂无 discovery trace。先输入创作想法。');
+      }
+      prompt();
       return;
     }
 
