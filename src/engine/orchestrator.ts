@@ -150,7 +150,26 @@ export class SculptorOrchestrator {
       );
     }
 
-    // Step 3: Generate natural response
+    // Step 3: Check if ready for outline FIRST (before LLM reply)
+    if (this.state.belief.overallConfidence > 0.65) {
+      // Auto-generate outline immediately
+      const outlineResult = await planStructure({
+        artifactType: this.state.belief.artifact.value,
+        topic: this.state.belief.topic.value,
+        purpose: this.state.belief.intent.value,
+        audience: this.state.belief.audience.value,
+        tone: this.state.belief.tone.value,
+        summary: getBeliefContext(this.state.belief),
+      });
+      this.state.outline = outlineResult.sections;
+      this.state.phase = 'outline';
+      return (
+        outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
+        '\n\n这个结构可以吗？输入 "确认" 开始写作，或告诉我需要调整的地方。'
+      );
+    }
+
+    // Step 4: Generate natural response (only if not ready for outline)
     const prompt = this.loadPrompt('orchestrator');
     const response = await getLLM().completeWithRetry({
       systemPrompt: prompt || this.getFallbackDiscoveryPrompt(),
@@ -159,42 +178,12 @@ ${getBeliefContext(this.state.belief)}
 
 用户说: "${input}"
 
-请用自然的中文回复用户。如果理解足够清晰（置信度>70%），建议生成大纲。如果不确定，问一个最有价值的问题。`,
+请用自然的中文回复用户。如果不确定，问一个最有价值的问题。`,
       temperature: 0.7,
       maxTokens: 500,
     });
 
-    const reply = response.text || '我理解了，请继续。';
-    this.state.messages.push({ role: 'assistant', content: reply });
-
-    // Check if ready for outline
-    if (this.state.belief.overallConfidence > 0.7 && this.state.belief.uncertainties.length <= 1) {
-      if (reply.includes('大纲') || reply.includes('结构') || reply.includes('开始写')) {
-        // User likely wants to proceed — generate outline automatically
-        const outlineResult = await planStructure({
-          artifactType: this.state.belief.artifact.value,
-          topic: this.state.belief.topic.value,
-          purpose: this.state.belief.intent.value,
-          audience: this.state.belief.audience.value,
-          tone: this.state.belief.tone.value,
-          summary: getBeliefContext(this.state.belief),
-        });
-        this.state.outline = outlineResult.sections;
-        this.state.phase = 'outline';
-        this.state.messages.push({
-          role: 'assistant',
-          content: `已生成大纲:\n${outlineResult.sections.map((s, i) => `${i + 1}. ${s.title} — ${s.goal}`).join('\n')}`,
-        });
-        return (
-          reply +
-          '\n\n' +
-          outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
-          '\n\n这个结构可以吗？输入 "确认" 开始写作，或告诉我需要调整的地方。'
-        );
-      }
-    }
-
-    return reply;
+    return response.text || '我理解了，请继续。';
   }
 
   private getFallbackDiscoveryPrompt(): string {

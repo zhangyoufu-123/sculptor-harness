@@ -38,7 +38,11 @@ async function main() {
   rl.setPrompt('\n> ');
   rl.prompt();
 
+  let _processing = false;
   rl.on('line', async (input: string) => {
+    if (_processing) return; // Prevent concurrent processing
+    _processing = true;
+
     const text = input.trim();
     if (text === '/exit' || text === '/quit') {
       console.log('\n👋 再见！\n');
@@ -51,28 +55,25 @@ async function main() {
       _orchestrator = new SculptorOrchestrator(text);
     }
 
-    const reply = await _orchestrator!.processInput(text);
-    console.log(`\n${reply}`);
-
-    // Check if ready for writing phase
-    const state = _orchestrator!.getState();
-    if (state.phase === 'outline' && state.outline.length > 0) {
-      console.log('\n📐 已生成大纲:');
-      state.outline.forEach((s, i) => console.log(`  ${i + 1}. ${s.title} — ${s.goal}`));
-      console.log('\n输入 "确认" 开始写作，或提出修改意见。');
-    }
-    if (state.phase === 'writing') {
-      console.log('\n进入写作阶段...');
-      rl.close();
-      startWritingPhase(state);
-      return;
-    }
-
-    // Guard: don't prompt on closed readline (piped input)
     try {
-      rl.prompt();
-    } catch {
-      /* piped input — ignore */
+      const reply = await _orchestrator!.processInput(text);
+      console.log(`\n${reply}`);
+
+      // Check if ready for writing phase
+      const state = _orchestrator!.getState();
+      if (state.phase === 'writing') {
+        console.log('\n进入写作阶段...');
+        rl.close();
+        startWritingPhase(state);
+        return;
+      }
+    } finally {
+      _processing = false;
+      try {
+        rl.prompt();
+      } catch {
+        /* piped input */
+      }
     }
   });
 }
