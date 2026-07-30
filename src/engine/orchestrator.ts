@@ -18,6 +18,11 @@ import {
 } from '@/runtime/discovery/hypothesis-generator';
 import { excavateMemories, type MemoryAsset } from '@/runtime/discovery/memory-excavator';
 import { think, displayThinking, type ThinkingTrace } from '@/runtime/discovery/thinking-display';
+import {
+  buildOutlineIncrement,
+  displayIncrementalOutline,
+  type OutlineSection as IncOutlineSection,
+} from '@/runtime/discovery/incremental-outline';
 import { assessReadiness } from '@/runtime/discovery/creative-director';
 import { reflectConsensus } from '@/runtime/discovery/consensus-engine';
 import {
@@ -51,6 +56,8 @@ export interface SessionState {
   phase: 'discovery' | 'outline' | 'writing' | 'done';
   hypotheses: CreativeHypothesis[];
   memories: MemoryAsset[];
+  /** Incremental outline — grows during conversation */
+  incOutline: IncOutlineSection[];
   creativeMemory: CreativeMemory;
 }
 
@@ -69,6 +76,7 @@ export class SculptorOrchestrator {
       messages: [],
       phase: 'discovery',
       hypotheses: [],
+      incOutline: [],
       memories: [],
       creativeMemory: createCreativeMemory(),
     };
@@ -80,6 +88,24 @@ export class SculptorOrchestrator {
 
   async processInput(userInput: string): Promise<string> {
     this.state.messages.push({ role: 'user', content: userInput });
+
+    // Handle /outline command
+    if (userInput.startsWith('/outline')) {
+      const outlineResult = await planStructure({
+        artifactType: this.state.belief.artifact.value,
+        topic: this.state.belief.topic.value,
+        purpose: this.state.belief.intent.value,
+        audience: this.state.belief.audience.value,
+        tone: this.state.belief.tone.value,
+        summary: getBeliefContext(this.state.belief),
+      });
+      this.state.outline = outlineResult.sections;
+      this.state.phase = 'outline';
+      return (
+        outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
+        '\n\n输入 "确认" 开始写作，或告诉我需要调整的地方。'
+      );
+    }
 
     switch (this.state.phase) {
       case 'discovery':
@@ -174,6 +200,21 @@ export class SculptorOrchestrator {
       this.state.creativeMemory.emotionalArc[0]?.feeling,
     );
 
+    // Build incremental outline (grows with each interaction)
+    const conversationSummary = this.state.messages
+      .slice(-6)
+      .map((m) => `${m.role}: ${m.content.slice(0, 80)}`)
+      .join(' | ');
+
+    const incResult = await buildOutlineIncrement(
+      conversationSummary,
+      this.state.incOutline,
+      getBeliefContext(this.state.belief),
+    );
+
+    // Update outline sections
+    this.state.incOutline = incResult.sections;
+
     // Step 5: If ready for outline, generate it
     if (readiness.canOutline) {
       const outlineResult = await planStructure({
@@ -185,6 +226,13 @@ export class SculptorOrchestrator {
         summary: `${getBeliefContext(this.state.belief)}\n\n${buildWritingContext(this.state.creativeMemory)}`,
       });
       this.state.outline = outlineResult.sections;
+      // Update incremental outline too
+      this.state.incOutline = outlineResult.sections.map((s) => ({
+        title: s.title,
+        goal: s.goal,
+        status: 'confirmed' as const,
+        addedAt: new Date().toISOString(),
+      }));
       this.state.phase = 'outline';
       return (
         outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
@@ -222,7 +270,19 @@ ${this.state.memories
       maxTokens: 500,
     });
 
-    return response.text || hypothesisSet.bestQuestion || '请继续说说你的想法。';
+    let reply = response.text || hypothesisSet.bestQuestion || '请继续说说你的想法。';
+
+    // Show incremental outline if it has content
+    if (this.state.incOutline.length > 0) {
+      console.log(displayIncrementalOutline(incResult));
+    }
+
+    // If outline is complete enough, suggest generating full outline
+    if (incResult.completion > 0.7) {
+      reply += '\n\n💡 大纲已经比较完整了。输入 /outline 生成完整大纲，或继续讨论。';
+    }
+
+    return reply;
   }
 
   private async handleRecovery(input: string): Promise<string> {
