@@ -1,5 +1,6 @@
 import type { IRuntimeContextBuilder, NodeRuntimeContext } from './domain-events';
 import type { PCSState, StructureSection } from '@/pcs/types';
+import { detectSignals, type ContextSignal, type ContextSignalType } from './context-signal-types';
 
 /**
  * Assembles standardized NodeRuntimeContext from PCS state.
@@ -82,6 +83,60 @@ export class RuntimeContextBuilder implements IRuntimeContextBuilder {
     };
   }
 
+  /**
+   * Analyze user input for context signals and return detected changes.
+   * Called when user types in the editor (debounced).
+   */
+  analyzeSignals(userInput: string, nodeId: string, previousContent: string): ContextSignal[] {
+    const result = detectSignals(userInput, nodeId, previousContent);
+    return result.signals;
+  }
+
+  /**
+   * Build context that adapts based on detected signals.
+   * E.g., if TOPIC_SHIFT detected, exclude current node context.
+   */
+  buildAdaptiveContext(
+    pcs: PCSState,
+    nodeId: string,
+    signals: ContextSignal[],
+  ): NodeRuntimeContext {
+    const baseContext = this.buildNodeContext(pcs, nodeId);
+
+    for (const signal of signals) {
+      switch (signal.type) {
+        case 'TOPIC_SHIFT':
+          // Clear node-specific context since topic is changing
+          baseContext.node = {
+            ...baseContext.node,
+            goal: '（主题变更中 — 等待用户确认）',
+          };
+          break;
+        case 'TEMP_REQUEST':
+          // User is asking a question, not editing — keep context light
+          baseContext.requiredTopics = [];
+          baseContext.revisionHistory = [];
+          break;
+        case 'USER_EVIDENCE':
+          // Add user's personal experience to knowledge context
+          baseContext.requiredTopics = [...baseContext.requiredTopics, '用户提供的个人经验'];
+          break;
+        case 'INTENT':
+          // Flag that intent may need updating
+          baseContext.intent = {
+            ...baseContext.intent,
+            purpose: '⚠️ 意图可能已变更 — ' + baseContext.intent.purpose,
+          };
+          break;
+        default:
+          // Keep existing context
+          break;
+      }
+    }
+
+    return baseContext;
+  }
+
   private buildEmptyContext(nodeId: string): NodeRuntimeContext {
     return {
       node: {
@@ -129,3 +184,5 @@ export class RuntimeContextBuilder implements IRuntimeContextBuilder {
 
 /** Global singleton */
 export const runtimeContextBuilder = new RuntimeContextBuilder();
+
+export type { ContextSignal, ContextSignalType };
