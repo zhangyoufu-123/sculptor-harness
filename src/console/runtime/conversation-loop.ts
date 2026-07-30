@@ -12,10 +12,8 @@ import * as readline from 'readline';
 import { PCSManager } from '@/pcs/pcs-manager';
 import { createPCSState, createMockField } from '@/test/mocks/pcs-factory';
 import type { PCSState, StructureSection, DraftState, NodeFunction } from '@/pcs/types';
-import { interpretIntent, ARTIFACT_LABELS } from '@/runtime/intent/intent-interpreter';
-import { generateHypotheses } from '@/runtime/intent/artifact-hypothesis';
-import { selectBestQuestion } from '@/runtime/intent/discovery-planner';
 import { artifactBuilder } from '@/discovery/artifact-builder';
+import { understandWithLLM, type LLMUnderstandingResult } from '@/runtime/intent/llm-understander';
 
 // =========================================================================
 // Types
@@ -49,6 +47,7 @@ interface ConsoleSession {
   creativeType: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   clarifyDims: any[];
+  understandingResult: LLMUnderstandingResult | null;
 }
 
 // =========================================================================
@@ -108,6 +107,7 @@ export function startConversationLoop(): void {
     nodeContents: {},
     creativeType: 'article',
     clarifyDims: [],
+    understandingResult: null,
   };
 
   // =========================================================================
@@ -161,7 +161,7 @@ export function startConversationLoop(): void {
   // Phase: Clarify
   // =========================================================================
 
-  function enterClarify(idea: string): void {
+  async function enterClarify(idea: string): Promise<void> {
     session.projectId = `proj-${Date.now().toString(36)}`;
     const state: PCSState = createPCSState({
       phase: 'clarifying',
@@ -176,51 +176,46 @@ export function startConversationLoop(): void {
     session.manager = new PCSManager(state);
     trace('PCS', `Project ${session.projectId} initialized`);
 
-    // Intent Understanding (replaces old Router)
-    const interpretation = interpretIntent(idea);
-    const hypotheses = generateHypotheses(idea);
+    // LLM Understanding
+    say('\n⏳ AI 正在理解你的意图...');
 
-    // Debug traces
+    const result = await understandWithLLM(idea);
+    session.understandingResult = result;
+
+    const u = result.understanding;
+    trace('LLM', result.llmSuccess ? 'DeepSeek API ✓' : 'Using fallback (API unavailable)');
     trace(
       'UNDERSTAND',
-      `Primary: ${ARTIFACT_LABELS[interpretation.primaryArtifact.type]} (${Math.round(interpretation.primaryArtifact.confidence * 100)}%)`,
+      `${u.artifactType} (${Math.round(u.artifactConfidence * 100)}%) — ${u.summary}`,
     );
-    trace('UNDERSTAND', `Topic: ${interpretation.topic}`);
-    trace('UNDERSTAND', `Unknowns: ${interpretation.unknowns.join(', ')}`);
+    trace('TOPIC', u.topic);
 
-    // Show rejected types
-    for (const r of interpretation.rejectedTypes) {
-      trace('REJECTED', `${ARTIFACT_LABELS[r.type]}: ${r.reason}`);
+    for (const h of result.hypotheses) {
+      trace('HYPOTHESIS', `${h.direction} (${Math.round(h.confidence * 100)}%) — ${h.reason}`);
     }
 
-    // Show hypotheses
-    for (const h of hypotheses.hypotheses) {
-      trace(
-        'HYPOTHESIS',
-        `${ARTIFACT_LABELS[h.artifactType]}: ${h.possibleDirections[0]} (${Math.round(h.confidence * 100)}%)`,
-      );
+    trace('UNKNOWNS', result.unknowns.join('、'));
+
+    // Display understanding
+    say(`\n💡 我理解：你想创作一个 **${u.artifactType}**`);
+    say(`   主题: "${u.topic}"`);
+    say(`   置信度: ${Math.round(u.artifactConfidence * 100)}%`);
+
+    if (result.hypotheses.length > 0) {
+      say('\n📋 可能的创作方向:');
+      result.hypotheses.forEach((h, i) => {
+        say(`   ${i + 1}. ${h.direction}`);
+      });
     }
 
-    // Select best question using information gain
-    const bestQ = selectBestQuestion(interpretation);
-    trace(
-      'QUESTION',
-      `Score: ${Math.round(bestQ.score * 100)} | Impact: ${Math.round(bestQ.impact * 100)}% | Gain: ${Math.round(bestQ.informationGain * 100)}%`,
-    );
-    trace('QUESTION', `Reason: ${bestQ.addresses}`);
-
-    say(`\n收到："${idea}"`);
-    say(
-      `\n💡 ${ARTIFACT_LABELS[interpretation.primaryArtifact.type]} · 主题: "${interpretation.topic}"`,
-    );
-    say(`   ${interpretation.explanation}`);
-    say(`\n${hypotheses.nextQuestion.text}`);
-
-    if (hypotheses.nextQuestion.options.length > 0) {
-      hypotheses.nextQuestion.options.forEach((opt: string, i: number) =>
-        console.log(`  ${i + 1}. ${opt}`),
-      );
+    // Show next question
+    say(`\n❓ ${result.nextQuestion.text}`);
+    if (result.nextQuestion.options.length > 0) {
+      result.nextQuestion.options.forEach((opt, i) => {
+        say(`   ${i + 1}. ${opt}`);
+      });
     }
+    say(`\n   💬 直接输入你的回答，或 /skip 跳过 /done 进入写作`);
 
     prompt();
   }
@@ -460,39 +455,43 @@ export function startConversationLoop(): void {
     switch (session.phase) {
       case 'welcome':
         session.phase = 'clarify';
-        enterClarify(input);
+        enterClarify(input).then(() => {});
         break;
 
-      case 'clarify':
+      case 'clarify': {
         if (input === '/done') {
           finishClarify();
           break;
         }
-        // Refine understanding: accumulate user answers and re-interpret
-        {
-          const accumulatedIdea = session.messages
-            .filter((m) => m.role === 'user')
-            .map((m) => m.content)
-            .join(' | ');
-          const interp = interpretIntent(accumulatedIdea);
-          const hypotheses = generateHypotheses(accumulatedIdea);
-
-          trace(
-            'UNDERSTAND',
-            `Updated: ${ARTIFACT_LABELS[interp.primaryArtifact.type]} (${Math.round(interp.primaryArtifact.confidence * 100)}%)`,
-          );
-          say(`\n💡 ${ARTIFACT_LABELS[interp.primaryArtifact.type]} · 主题: "${interp.topic}"`);
-          say(`   ${interp.explanation}`);
-          say(`\n${hypotheses.nextQuestion.text}`);
-          if (hypotheses.nextQuestion.options.length > 0) {
-            hypotheses.nextQuestion.options.forEach((opt: string, i: number) =>
-              console.log(`  ${i + 1}. ${opt}`),
-            );
-          }
-          say('\n输入 /done 完成需求确认');
-          prompt();
+        if (input === '/skip') {
+          say('  已跳过，进入蓝图');
+          finishClarify();
+          break;
         }
+        // User answered — re-understand with context
+        const history = session.messages
+          .slice(-10)
+          .map((m) => `${m.role}: ${m.content}`)
+          .join('\n');
+        understandWithLLM(input, history).then((newResult) => {
+          session.understandingResult = newResult;
+          const u = newResult.understanding;
+          trace(
+            'REFINE',
+            `Updated: ${u.artifactType} (${Math.round(u.artifactConfidence * 100)}%)`,
+          );
+          say(`\n💡 更新理解: ${u.summary}`);
+          if (newResult.nextQuestion.text) {
+            say(`\n❓ ${newResult.nextQuestion.text}`);
+            if (newResult.nextQuestion.options.length > 0) {
+              newResult.nextQuestion.options.forEach((opt, i) => say(`   ${i + 1}. ${opt}`));
+            }
+          }
+          say('\n   💬 继续回答，或 /done 进入写作');
+          prompt();
+        });
         break;
+      }
 
       case 'blueprint': {
         if (input === 'A' || input === 'a') {
