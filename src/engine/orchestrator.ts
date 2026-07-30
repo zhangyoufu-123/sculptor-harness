@@ -143,7 +143,7 @@ export class SculptorOrchestrator {
     this.state.belief.tone = understanding.tone;
     this.state.belief.summary = understanding.summary;
     this.state.belief.confidence = understanding.confidence;
-    this.state.belief.uncertainties = understanding.uncertainties;
+    this.state.belief.uncertainties = understanding.uncertainties || [];
 
     // Step 3: Generate natural response
     const prompt = this.loadPrompt('orchestrator');
@@ -152,7 +152,7 @@ export class SculptorOrchestrator {
       prompt: `当前理解:
 ${this.getBeliefSummary()}
 
-不确定点: ${this.state.belief.uncertainties.join('、') || '无'}
+不确定点: ${(this.state.belief.uncertainties || []).join('、') || '无'}
 
 用户说: "${input}"
 
@@ -165,7 +165,7 @@ ${this.getBeliefSummary()}
     this.state.messages.push({ role: 'assistant', content: reply });
 
     // Check if ready for outline
-    if (this.state.belief.confidence > 0.7 && this.state.belief.uncertainties.length <= 1) {
+    if (this.state.belief.confidence > 0.7 && (this.state.belief.uncertainties || []).length <= 1) {
       if (reply.includes('大纲') || reply.includes('结构') || reply.includes('开始写')) {
         // User likely wants to proceed — generate outline automatically
         const outlineResult = await planStructure({
