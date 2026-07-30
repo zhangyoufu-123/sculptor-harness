@@ -73,6 +73,28 @@ export async function excavateMemories(
   existingAssets: MemoryAsset[] = [],
   context?: string,
 ): Promise<ExcavationResult> {
+  // Guard: don't excavate for academic/intellectual topics
+  const intellectualKeywords = [
+    '论文',
+    '哲学',
+    '学术',
+    '理论',
+    '研究',
+    '分析',
+    '论证',
+    '观点',
+    '层面',
+    '社会学',
+  ];
+  if (intellectualKeywords.some((k) => input.includes(k))) {
+    return {
+      assets: [],
+      gaps: [],
+      nextQuestion: '',
+      hasEnoughMaterial: true, // Don't need personal memories for academic work
+    };
+  }
+
   const prompt = `用户素材: "${input}"
 已有素材: ${JSON.stringify(existingAssets.slice(0, 5))}
 ${context ? `创作上下文: ${context}` : ''}

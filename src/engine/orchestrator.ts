@@ -97,13 +97,58 @@ export class SculptorOrchestrator {
   // =========================================================================
 
   private async handleDiscovery(input: string): Promise<string> {
+    // Recovery mode: user is confused — backtrack and re-explain
+    const confusionSignals = [
+      '不理解',
+      '不懂',
+      '什么意思',
+      '怎么变成',
+      '不是这样',
+      '不对',
+      '跑偏',
+      '不是讨论',
+    ];
+    const isConfused = confusionSignals.some((s) => input.includes(s));
+
+    if (isConfused) {
+      const recoveryPrompt = `对话出错了。用户说: "${input}"
+之前的对话历史:
+${this.state.messages
+  .slice(-6)
+  .map((m) => `${m.role}: ${m.content.slice(0, 100)}`)
+  .join('\n')}
+
+请:
+1. 承认对话跑偏了
+2. 回顾用户最初想讨论什么（${this.state.belief.topic.value}）
+3. 回到正轨——问一个关于核心议题的问题
+不要道歉过度。直接回到正题。`;
+
+      const response = await getLLM().completeWithRetry({
+        systemPrompt: '你是创作伙伴。对话跑偏时，承认、回顾、回到正轨。',
+        prompt: recoveryPrompt,
+        temperature: 0.5,
+        maxTokens: 400,
+      });
+      return (
+        response.text ||
+        '抱歉跑偏了。让我们回到正题：关于' +
+          this.state.belief.topic.value +
+          '，你的核心观点是什么？'
+      );
+    }
+
     // Step 1: Extract creative assets (metaphors, decisions)
     extractCreativeAssets(input, this.state.creativeMemory);
 
     // Consensus Reflection: validate shared understanding FIRST
     // Only do this on the first interaction (when no hypotheses exist yet)
     if (this.state.hypotheses.length === 0) {
-      const consensus = await reflectConsensus(input);
+      const history = this.state.messages
+        .slice(-6)
+        .map((m) => `${m.role}: ${m.content.slice(0, 100)}`)
+        .join('\n');
+      const consensus = await reflectConsensus(input, history);
       this.state.hypotheses = [
         {
           interpretation: consensus.understanding,
@@ -129,8 +174,40 @@ export class SculptorOrchestrator {
     const hypothesisSet = await generateHypotheses(input, history);
     this.state.hypotheses = hypothesisSet.hypotheses;
 
-    // Step 3: Excavate memories if we have concrete material
-    if (input.length > 30) {
+    // Step 3: Excavate memories — only for narrative/creative works, NOT academic papers
+    // Detect conversation mode to prevent excavator from triggering on intellectual topics
+    const intellectualSignals = [
+      '论文',
+      '研究',
+      '哲学',
+      '理论',
+      '分析',
+      '讨论',
+      '学术',
+      '层面',
+      '社会学',
+      '观点',
+      '论证',
+    ];
+    const creativeSignals = [
+      '回忆',
+      '小时候',
+      '记得',
+      '画面',
+      '场景',
+      '故事',
+      '感受',
+      '经历',
+      '感官',
+      '味道',
+      '颜色',
+    ];
+
+    const isIntellectual = intellectualSignals.some((s) => input.includes(s));
+    const isCreative = creativeSignals.some((s) => input.includes(s));
+    const isMemoryExcavation = isCreative && !isIntellectual;
+
+    if (isMemoryExcavation && input.length > 30) {
       const excavation = await excavateMemories(
         input,
         this.state.memories,

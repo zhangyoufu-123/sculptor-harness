@@ -72,11 +72,17 @@ const CONSENSUS_PROMPT = `你是共识分析专家。你的任务是分析用户
  * This is the FIRST response the AI should give — not a question,
  * but a reflection that validates the shared understanding.
  */
-export async function reflectConsensus(input: string): Promise<ConsensusReflection> {
+export async function reflectConsensus(
+  input: string,
+  conversationHistory?: string,
+): Promise<ConsensusReflection> {
   try {
     const response = await getLLM().completeWithRetry({
       systemPrompt: CONSENSUS_PROMPT,
-      prompt: `用户的创作想法: "${input}"\n\n请以JSON格式输出你的分析。`,
+      prompt: `用户的创作想法: "${input}"
+${conversationHistory ? `对话历史（用于理解上下文，不要重复已经讨论过的内容）:\n${conversationHistory}` : ''}
+
+请以JSON格式输出你的分析。`,
       responseFormat: 'json',
       temperature: 0.4,
       maxTokens: 1000,
