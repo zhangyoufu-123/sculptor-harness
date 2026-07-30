@@ -15,7 +15,11 @@ import { understandIntent } from '@/skills/intent-understanding';
 import { planStructure } from '@/skills/structure-planning';
 import { generateContent } from '@/skills/content-generation';
 
-const llm = new LLMClient();
+let _llm: LLMClient | null = null;
+function getLLM(): LLMClient {
+  if (!_llm) _llm = new LLMClient();
+  return _llm;
+}
 
 // =========================================================================
 // Belief State (shared across agents)
@@ -147,7 +151,7 @@ export class SculptorOrchestrator {
 
     // Step 3: Generate natural response
     const prompt = this.loadPrompt('orchestrator');
-    const response = await llm.completeWithRetry({
+    const response = await getLLM().completeWithRetry({
       systemPrompt: prompt || this.getFallbackDiscoveryPrompt(),
       prompt: `当前理解:
 ${this.getBeliefSummary()}

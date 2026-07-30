@@ -5,7 +5,11 @@
 
 import { LLMClient } from '@/lib/llm-client';
 
-const llm = new LLMClient();
+let _llm: LLMClient | null = null;
+function getLLM(): LLMClient {
+  if (!_llm) _llm = new LLMClient();
+  return _llm;
+}
 
 export interface GenerationInput {
   sectionTitle: string;
@@ -51,7 +55,7 @@ ${input.previousContent ? `前文: ${input.previousContent.slice(-100)}` : ''}
 ${input.nextSectionTitle ? `下一节: ${input.nextSectionTitle}` : ''}`;
 
   try {
-    const response = await llm.completeWithRetry({
+    const response = await getLLM().completeWithRetry({
       systemPrompt: GENERATION_PROMPT,
       prompt,
       temperature: 0.7,

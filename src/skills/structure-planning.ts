@@ -5,7 +5,11 @@
 
 import { LLMClient } from '@/lib/llm-client';
 
-const llm = new LLMClient();
+let _llm: LLMClient | null = null;
+function getLLM(): LLMClient {
+  if (!_llm) _llm = new LLMClient();
+  return _llm;
+}
 
 export interface StructureInput {
   artifactType: string;
@@ -52,7 +56,7 @@ export async function planStructure(input: StructureInput): Promise<StructureOut
 理解: ${input.summary}`;
 
   try {
-    const response = await llm.completeWithRetry({
+    const response = await getLLM().completeWithRetry({
       systemPrompt: STRUCTURE_PROMPT,
       prompt,
       responseFormat: 'json',

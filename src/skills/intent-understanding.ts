@@ -6,7 +6,11 @@
 
 import { LLMClient } from '@/lib/llm-client';
 
-const llm = new LLMClient();
+let _llm: LLMClient | null = null;
+function getLLM(): LLMClient {
+  if (!_llm) _llm = new LLMClient();
+  return _llm;
+}
 
 export interface UnderstandingInput {
   userInput: string;
@@ -50,7 +54,7 @@ ${input.currentBeliefs ? `当前信念: ${JSON.stringify(input.currentBeliefs)}`
 ${input.conversationHistory ? `对话历史: ${input.conversationHistory}` : ''}`;
 
   try {
-    const response = await llm.completeWithRetry({
+    const response = await getLLM().completeWithRetry({
       systemPrompt: DISCOVERY_PROMPT,
       prompt,
       responseFormat: 'json',

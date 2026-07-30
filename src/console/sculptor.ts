@@ -1,5 +1,10 @@
 #!/usr/bin/env tsx
 
+// Load .env.local before anything else
+import { config } from 'dotenv';
+import { resolve } from 'path';
+config({ path: resolve(process.cwd(), '.env.local') });
+
 /**
  * Sculptor Console — Agent Collaboration Cluster
  *
