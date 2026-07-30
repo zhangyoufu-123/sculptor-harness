@@ -886,7 +886,7 @@ export function startWritingPhase(orchestratorState: SessionState): void {
       content: m.content,
     })),
     nodeContents: {},
-    creativeType: orchestratorState.belief.artifactType,
+    creativeType: orchestratorState.belief.artifact.value,
     clarifyDims: [],
     understandingResult: null,
     beliefState: null,

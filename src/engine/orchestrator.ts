@@ -11,6 +11,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { LLMClient } from '@/lib/llm-client';
+import {
+  createBeliefState,
+  reviseBelief,
+  getBeliefContext,
+  addUncertainty,
+  recordMisunderstanding,
+  type BeliefState,
+} from '@/runtime/belief-revision';
 import { understandIntent } from '@/skills/intent-understanding';
 import { planStructure } from '@/skills/structure-planning';
 import { generateContent } from '@/skills/content-generation';
@@ -25,17 +33,6 @@ function getLLM(): LLMClient {
 // Belief State (shared across agents)
 // =========================================================================
 
-export interface Belief {
-  artifactType: string;
-  topic: string;
-  purpose: string;
-  audience: string;
-  tone: string;
-  summary: string;
-  confidence: number;
-  uncertainties: string[];
-}
-
 export interface OutlineSection {
   title: string;
   goal: string;
@@ -43,7 +40,7 @@ export interface OutlineSection {
 }
 
 export interface SessionState {
-  belief: Belief;
+  belief: BeliefState;
   outline: OutlineSection[];
   currentSection: number;
   messages: Array<{ role: string; content: string }>;
@@ -60,16 +57,7 @@ export class SculptorOrchestrator {
 
   constructor(initialIdea: string) {
     this.state = {
-      belief: {
-        artifactType: '未知',
-        topic: initialIdea,
-        purpose: '未知',
-        audience: '未知',
-        tone: '未知',
-        summary: '',
-        confidence: 0.3,
-        uncertainties: [],
-      },
+      belief: createBeliefState(initialIdea),
       outline: [],
       currentSection: 0,
       messages: [],
@@ -93,12 +81,6 @@ export class SculptorOrchestrator {
       .slice(-10)
       .map((m) => `${m.role}: ${m.content}`)
       .join('\n');
-  }
-
-  /** Get belief summary */
-  private getBeliefSummary(): string {
-    const b = this.state.belief;
-    return `类型: ${b.artifactType} | 主题: ${b.topic} | 目的: ${b.purpose} | 读者: ${b.audience} | 语气: ${b.tone} | 置信度: ${Math.round(b.confidence * 100)}%`;
   }
 
   // =========================================================================
@@ -130,33 +112,50 @@ export class SculptorOrchestrator {
       userInput: input,
       conversationHistory: this.getHistory(),
       currentBeliefs: {
-        artifactType: this.state.belief.artifactType,
-        topic: this.state.belief.topic,
+        artifactType: this.state.belief.artifact.value,
+        topic: this.state.belief.topic.value,
       },
     });
 
-    // Step 2: Update belief
-    if (understanding.artifactType !== '未知') {
-      this.state.belief.artifactType = understanding.artifactType;
+    // Step 2: Revise belief based on LLM understanding
+    reviseBelief(
+      this.state.belief,
+      {
+        artifact: understanding.artifactType !== '未知' ? understanding.artifactType : undefined,
+        intent: understanding.purpose !== '未知' ? understanding.purpose : undefined,
+        topic: understanding.topic,
+        audience: understanding.audience !== '未知' ? understanding.audience : undefined,
+        tone: understanding.tone !== '未知' ? understanding.tone : undefined,
+      },
+      `LLM理解: ${understanding.summary}`,
+    );
+
+    // Add uncertainties from LLM
+    for (const u of understanding.uncertainties || []) {
+      addUncertainty(this.state.belief, {
+        field: 'direction',
+        question: u,
+        importance: 0.7,
+        asked: false,
+      });
     }
-    if (understanding.topic && understanding.topic !== input) {
-      this.state.belief.topic = understanding.topic;
+
+    // Record low-confidence understandings
+    if (understanding.confidence < 0.25) {
+      recordMisunderstanding(
+        this.state.belief,
+        '低置信度理解',
+        understanding.summary,
+        '需更多澄清',
+      );
     }
-    this.state.belief.purpose = understanding.purpose;
-    this.state.belief.audience = understanding.audience;
-    this.state.belief.tone = understanding.tone;
-    this.state.belief.summary = understanding.summary;
-    this.state.belief.confidence = understanding.confidence;
-    this.state.belief.uncertainties = understanding.uncertainties || [];
 
     // Step 3: Generate natural response
     const prompt = this.loadPrompt('orchestrator');
     const response = await getLLM().completeWithRetry({
       systemPrompt: prompt || this.getFallbackDiscoveryPrompt(),
       prompt: `当前理解:
-${this.getBeliefSummary()}
-
-不确定点: ${(this.state.belief.uncertainties || []).join('、') || '无'}
+${getBeliefContext(this.state.belief)}
 
 用户说: "${input}"
 
@@ -169,16 +168,16 @@ ${this.getBeliefSummary()}
     this.state.messages.push({ role: 'assistant', content: reply });
 
     // Check if ready for outline
-    if (this.state.belief.confidence > 0.7 && (this.state.belief.uncertainties || []).length <= 1) {
+    if (this.state.belief.overallConfidence > 0.7 && this.state.belief.uncertainties.length <= 1) {
       if (reply.includes('大纲') || reply.includes('结构') || reply.includes('开始写')) {
         // User likely wants to proceed — generate outline automatically
         const outlineResult = await planStructure({
-          artifactType: this.state.belief.artifactType,
-          topic: this.state.belief.topic,
-          purpose: this.state.belief.purpose,
-          audience: this.state.belief.audience,
-          tone: this.state.belief.tone,
-          summary: this.state.belief.summary,
+          artifactType: this.state.belief.artifact.value,
+          topic: this.state.belief.topic.value,
+          purpose: this.state.belief.intent.value,
+          audience: this.state.belief.audience.value,
+          tone: this.state.belief.tone.value,
+          summary: getBeliefContext(this.state.belief),
         });
         this.state.outline = outlineResult.sections;
         this.state.phase = 'outline';
@@ -221,8 +220,12 @@ ${this.getBeliefSummary()}
 
     // User wants to adjust — regenerate via LLM
     const result = await planStructure({
-      ...this.state.belief,
-      summary: this.state.belief.summary + `\n用户反馈: ${input}`,
+      artifactType: this.state.belief.artifact.value,
+      topic: this.state.belief.topic.value,
+      purpose: this.state.belief.intent.value,
+      audience: this.state.belief.audience.value,
+      tone: this.state.belief.tone.value,
+      summary: getBeliefContext(this.state.belief) + `\n用户反馈: ${input}`,
     });
     this.state.outline = result.sections;
     return (
@@ -250,10 +253,10 @@ ${this.getBeliefSummary()}
       const result = await generateContent({
         sectionTitle: section.title,
         sectionGoal: section.goal,
-        artifactType: this.state.belief.artifactType,
-        topic: this.state.belief.topic,
-        audience: this.state.belief.audience,
-        tone: this.state.belief.tone,
+        artifactType: this.state.belief.artifact.value,
+        topic: this.state.belief.topic.value,
+        audience: this.state.belief.audience.value,
+        tone: this.state.belief.tone.value,
         previousContent: prevContent,
         nextSectionTitle: nextTitle,
       });
