@@ -21,6 +21,7 @@ import {
   type BeliefState,
 } from '@/runtime/intent/belief-state';
 import { planNextQuestion } from '@/runtime/intent/question-planner';
+import { planStructure } from '@/skills/structure-planning';
 import type { SessionState } from '@/engine/orchestrator';
 
 // =========================================================================
@@ -53,27 +54,9 @@ interface ConsoleSession {
   nodeContents: Record<string, string>;
   // Dynamic clarification
   creativeType: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  clarifyDims: any[];
   understandingResult: LLMUnderstandingResult | null;
   beliefState: BeliefState | null;
 }
-
-// =========================================================================
-// Mock content by section title
-// =========================================================================
-
-const MOCK_CONTENT: Record<string, string> = {
-  引言: '人工智能技术正以前所未有的速度渗透到各行各业。教育领域，作为社会发展的基石，面临着深刻的变革。过去五年间，全球教育科技投资增长了300%，AI驱动的个性化学习成为最受关注的赛道。',
-  技术分析:
-    '自适应学习系统是AI教育的技术核心。通过实时分析学生的学习行为、知识盲区和认知风格，系统能够动态调整教学内容和难度。自然语言处理和知识图谱技术已在智能答疑、自动批改和学情分析三个方向取得突破。',
-  案例研究:
-    '以可汗学院的Khanmigo助手为例，该系统已服务超过50万名学生。数据显示，使用AI辅助学习的学生在数学科目上平均提升了23%的成绩。中国好未来教育集团的AI教师已覆盖300多个城市的线下课堂。',
-  挑战与风险:
-    '然而，AI在教育领域的大规模应用仍面临三大核心挑战：数据隐私保护、算法偏见问题、以及教师角色的重新定义。如何在个性化服务和隐私保护之间取得平衡，是行业必须回答的问题。',
-  结论与建议:
-    '基于以上分析，教育从业者应采取渐进策略整合AI：第一步，将AI引入批改和练习等重复性工作；第二步，建立校内AI素养培训体系；第三步，制定数据伦理规范。教师不会被AI替代，但善用AI的教师将替代不用的教师。',
-};
 
 // =========================================================================
 // Conversation Loop
@@ -94,7 +77,6 @@ export function startConversationLoop(): void {
     messages: [],
     nodeContents: {},
     creativeType: 'article',
-    clarifyDims: [],
     understandingResult: null,
     beliefState: null,
   };
@@ -177,6 +159,7 @@ export function startConversationLoop(): void {
 
     // Populate belief state from LLM understanding
     const u = result.understanding;
+    session.creativeType = u.artifactType;
     belief.artifactBeliefs.push({
       type: u.artifactType,
       confidence: u.artifactConfidence,
@@ -256,22 +239,96 @@ export function startConversationLoop(): void {
   // =========================================================================
 
   function enterBlueprint(artifactType: string, topic: string): void {
-    // Generate sections based on ACTUAL creative type, not hardcoded AI教育
-    const sections = generateSectionsForType(artifactType, topic);
-    session.sections = sections;
+    planStructure({
+      artifactType,
+      topic,
+      purpose: topic,
+      audience: '普通读者',
+      tone: '自然',
+      summary: `主题: ${topic}`,
+    })
+      .then((result) => {
+        session.sections = result.sections.map((s, i) => ({
+          id: `n${i + 1}`,
+          title: s.title,
+          goal: s.goal,
+          function:
+            i === 0 ? 'introduce' : i === result.sections.length - 1 ? 'conclude' : 'argument',
+          hardness: 'hard',
+          order: i,
+          draft_state: 'empty',
+          content_draft: '',
+          pcs_status: 'confirmed',
+          source: 'ai',
+          confidence: 0.9,
+        })) as StructureSection[];
 
-    trace('STRUCTURE', `${sections.length} sections for ${artifactType}`);
-    trace('STRUCTURE', `Topic: ${topic}`);
+        trace('STRUCTURE', `${session.sections.length} sections for ${artifactType}`);
+        trace('STRUCTURE', `Topic: ${topic}`);
 
-    divider('📐 大纲工坊');
-    say('');
-    sections.forEach((s, i) => {
-      const icon = s.hardness === 'hard' ? '🔒' : '📝';
-      say(`  ${i + 1}. ${icon} ${s.title}`);
-      say(`     ${s.goal}`);
-    });
-    say('\n操作: A=确认进入写作  1-5=编辑章节');
-    prompt();
+        divider('📐 大纲工坊');
+        say('');
+        session.sections.forEach((s, i) => {
+          const icon = s.hardness === 'hard' ? '🔒' : '📝';
+          say(`  ${i + 1}. ${icon} ${s.title}`);
+          say(`     ${s.goal}`);
+        });
+        say('\n操作: A=确认进入写作  1-5=编辑章节');
+        prompt();
+      })
+      .catch(() => {
+        session.sections = [
+          {
+            id: 'n1',
+            title: '引言',
+            goal: `围绕"${topic.slice(0, 20)}"建立认知`,
+            function: 'introduce',
+            hardness: 'hard',
+            order: 0,
+            draft_state: 'empty',
+            content_draft: '',
+            pcs_status: 'confirmed',
+            source: 'ai',
+            confidence: 0.9,
+          },
+          {
+            id: 'n2',
+            title: '主体',
+            goal: '展开论述',
+            function: 'argument',
+            hardness: 'hard',
+            order: 1,
+            draft_state: 'empty',
+            content_draft: '',
+            pcs_status: 'confirmed',
+            source: 'ai',
+            confidence: 0.9,
+          },
+          {
+            id: 'n3',
+            title: '结论',
+            goal: '总结',
+            function: 'conclude',
+            hardness: 'hard',
+            order: 2,
+            draft_state: 'empty',
+            content_draft: '',
+            pcs_status: 'confirmed',
+            source: 'ai',
+            confidence: 0.9,
+          },
+        ] as StructureSection[];
+        trace('STRUCTURE', 'LLM failed — using fallback structure');
+
+        divider('📐 大纲工坊');
+        say('');
+        session.sections.forEach((s, i) => {
+          say(`  ${i + 1}. ${s.title}`);
+          say(`     ${s.goal}`);
+        });
+        say('\n操作: A=确认进入写作  1-5=编辑章节');
+        prompt();
+      });
   }
 
   // =========================================================================
@@ -327,14 +384,6 @@ export function startConversationLoop(): void {
       say('操作: /gen=重新生成  /edit=编辑  /reflect=反思  /done=完成  /back=返回列表');
     }
     prompt();
-  }
-
-  function generateContent(): void {
-    const s = session.sections[session.currentSectionIdx];
-    const text = MOCK_CONTENT[s.title] || `关于"${s.goal}"的生成内容。`;
-    session.nodeContents[s.id] = text;
-    trace('GENERATE', `Node ${s.id}: ${text.length} chars`);
-    say(`\n✍️ AI生成:\n\n${text}\n`);
   }
 
   function reflectCurrentNode(): void {
@@ -560,9 +609,8 @@ export function startConversationLoop(): void {
 
       case 'writing_node':
         if (input === '/gen') {
-          generateContent();
-          prompt();
-          break;
+          generateSectionContent(session).then(() => prompt());
+          return;
         }
         if (input === '/done') {
           if (session.nodeContents[session.sections[session.currentSectionIdx].id]) {
@@ -638,204 +686,6 @@ export function startConversationLoop(): void {
   rl.on('close', () => process.exit(0));
 
   enterWelcome();
-
-  // =========================================================================
-  // Section Generator — maps artifact type to blueprint sections
-  // =========================================================================
-
-  function generateSectionsForType(artifactType: string, topic: string): StructureSection[] {
-    const topicShort = topic.length > 20 ? topic.slice(0, 20) : topic;
-
-    // Prose/散文 structure
-    if (
-      artifactType === '散文' ||
-      artifactType === 'prose' ||
-      topic.includes('散文') ||
-      topic.includes('感悟')
-    ) {
-      return [
-        {
-          id: 'n1',
-          title: '启程：离开日常',
-          goal: `描述出发的动机和心境 — 为什么要独自走入山林？`,
-          function: 'introduce',
-          hardness: 'hard',
-          order: 0,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-        {
-          id: 'n2',
-          title: '融入：山林体验',
-          goal: `记录在自然中的感官体验和内心变化`,
-          function: 'argument',
-          hardness: 'hard',
-          order: 1,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-        {
-          id: 'n3',
-          title: '反思：独处的意义',
-          goal: `从个人体验上升到对孤独、自由、人生的思考`,
-          function: 'argument',
-          hardness: 'hard',
-          order: 2,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-        {
-          id: 'n4',
-          title: '回归：带回的礼物',
-          goal: `描述回到社会后的变化 — 这场旅程改变了什么？`,
-          function: 'conclude',
-          hardness: 'hard',
-          order: 3,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-      ];
-    }
-
-    // Novel structure
-    if (artifactType === '小说' || artifactType === 'novel') {
-      return [
-        {
-          id: 'n1',
-          title: '开篇：世界的裂缝',
-          goal: `建立故事世界，引入主人公和核心冲突`,
-          function: 'introduce',
-          hardness: 'hard',
-          order: 0,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-        {
-          id: 'n2',
-          title: '发展：冲突升级',
-          goal: `深化冲突，揭示角色动机`,
-          function: 'argument',
-          hardness: 'hard',
-          order: 1,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-        {
-          id: 'n3',
-          title: '转折：关键选择',
-          goal: `角色面临关键抉择，故事方向改变`,
-          function: 'counter',
-          hardness: 'hard',
-          order: 2,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-        {
-          id: 'n4',
-          title: '高潮：最终对抗',
-          goal: `冲突达到顶点，核心主题浮现`,
-          function: 'argument',
-          hardness: 'hard',
-          order: 3,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-        {
-          id: 'n5',
-          title: '结局：新的平衡',
-          goal: `故事收束，展现角色和世界的变化`,
-          function: 'conclude',
-          hardness: 'hard',
-          order: 4,
-          draft_state: 'empty',
-          content_draft: '',
-          pcs_status: 'confirmed',
-          source: 'ai',
-          confidence: 0.9,
-        },
-      ];
-    }
-
-    // Default: generic essay/article
-    return [
-      {
-        id: 'n1',
-        title: '引言',
-        goal: `围绕"${topicShort}"建立读者认知`,
-        function: 'introduce',
-        hardness: 'hard',
-        order: 0,
-        draft_state: 'empty',
-        content_draft: '',
-        pcs_status: 'confirmed',
-        source: 'ai',
-        confidence: 0.9,
-      },
-      {
-        id: 'n2',
-        title: '主体一',
-        goal: `展开第一个核心论点`,
-        function: 'argument',
-        hardness: 'hard',
-        order: 1,
-        draft_state: 'empty',
-        content_draft: '',
-        pcs_status: 'confirmed',
-        source: 'ai',
-        confidence: 0.9,
-      },
-      {
-        id: 'n3',
-        title: '主体二',
-        goal: `展开第二个核心论点或提供案例`,
-        function: 'evidence',
-        hardness: 'soft',
-        order: 2,
-        draft_state: 'empty',
-        content_draft: '',
-        pcs_status: 'confirmed',
-        source: 'ai',
-        confidence: 0.9,
-      },
-      {
-        id: 'n4',
-        title: '结论',
-        goal: `总结并呼应引言`,
-        function: 'conclude',
-        hardness: 'hard',
-        order: 3,
-        draft_state: 'empty',
-        content_draft: '',
-        pcs_status: 'confirmed',
-        source: 'ai',
-        confidence: 0.9,
-      },
-    ];
-  }
 }
 
 // =========================================================================
@@ -887,7 +737,6 @@ export function startWritingPhase(orchestratorState: SessionState): void {
     })),
     nodeContents: {},
     creativeType: orchestratorState.belief.artifact.value,
-    clarifyDims: [],
     understandingResult: null,
     beliefState: null,
   };
