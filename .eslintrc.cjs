@@ -22,7 +22,7 @@ module.exports = {
   overrides: [
     {
       // CLI files use console for terminal output
-      files: ['src/cli/**/*.ts', 'src/console/**/*.ts'],
+      files: ['src/cli/**/*.ts', 'src/console/**/*.ts', 'src/runtime/discovery/thinking-display.ts'],
       rules: {
         'no-console': 'off',
         '@typescript-eslint/no-explicit-any': 'off',
