@@ -22,6 +22,7 @@ import {
 import { understandIntent } from '@/skills/intent-understanding';
 import { planStructure } from '@/skills/structure-planning';
 import { generateContent } from '@/skills/content-generation';
+import { assessCompletion } from '@/runtime/completion-assessor';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -150,9 +151,21 @@ export class SculptorOrchestrator {
       );
     }
 
-    // Step 3: Check if ready for outline FIRST (before LLM reply)
-    if (this.state.belief.overallConfidence > 0.65) {
-      // Auto-generate outline immediately
+    // Step 3: Assess completion quality — not just a simple threshold
+    const assessment = assessCompletion(this.state.belief);
+
+    // Log assessment for debugging
+    if (process.env.DEBUG) {
+      console.log(
+        `  [ASSESS] Score:${Math.round(assessment.overallScore * 100)}% Rec:${assessment.recommendation} Gaps:${assessment.gaps.join(',')}`,
+      );
+    }
+
+    if (
+      assessment.recommendation === 'generate_outline' ||
+      assessment.recommendation === 'proceed_to_writing'
+    ) {
+      // Understanding is sufficient — generate outline
       const outlineResult = await planStructure({
         artifactType: this.state.belief.artifact.value,
         topic: this.state.belief.topic.value,
@@ -169,16 +182,21 @@ export class SculptorOrchestrator {
       );
     }
 
-    // Step 4: Generate natural response (only if not ready for outline)
+    // Not ready yet — ask a focused question targeting the biggest gap
+    const focusGap = assessment.gaps[0] || '创作意图';
     const prompt = this.loadPrompt('orchestrator');
     const response = await getLLM().completeWithRetry({
       systemPrompt: prompt || this.getFallbackDiscoveryPrompt(),
       prompt: `当前理解:
 ${getBeliefContext(this.state.belief)}
 
+理解完成度: ${Math.round(assessment.overallScore * 100)}%
+最大缺口: ${focusGap}
+建议继续交互: ${assessment.suggestedRemainingRounds} 轮
+
 用户说: "${input}"
 
-请用自然的中文回复用户。如果不确定，问一个最有价值的问题。`,
+请用自然中文回复。针对"${focusGap}"这个缺口，问一个最有价值的问题。不要问已经知道的信息。`,
       temperature: 0.7,
       maxTokens: 500,
     });
