@@ -12,13 +12,10 @@ import * as readline from 'readline';
 import { PCSManager } from '@/pcs/pcs-manager';
 import { createPCSState, createMockField } from '@/test/mocks/pcs-factory';
 import type { PCSState, StructureSection, DraftState, NodeFunction } from '@/pcs/types';
-import { classifyCreativeType, CREATIVE_TYPE_LABELS } from '@/runtime/creative-type-router';
-import { getClarificationSchema } from '@/runtime/clarification-schemas';
-import type { ClarifyDimension } from '@/runtime/clarification-schemas';
-import type { CreativeType } from '@/runtime/creative-type-router';
-import { classifyProject } from '@/discovery/project-classifier';
+import { interpretIntent, ARTIFACT_LABELS } from '@/runtime/intent/intent-interpreter';
+import { generateHypotheses } from '@/runtime/intent/artifact-hypothesis';
+import { selectBestQuestion } from '@/runtime/intent/discovery-planner';
 import { artifactBuilder } from '@/discovery/artifact-builder';
-import { analyzeInput } from '@/discovery/conversation-analyzer';
 
 // =========================================================================
 // Types
@@ -49,8 +46,9 @@ interface ConsoleSession {
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   nodeContents: Record<string, string>;
   // Dynamic clarification
-  creativeType: CreativeType;
-  clarifyDims: ClarifyDimension[];
+  creativeType: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  clarifyDims: any[];
 }
 
 // =========================================================================
@@ -164,7 +162,6 @@ export function startConversationLoop(): void {
   // =========================================================================
 
   function enterClarify(idea: string): void {
-    // Initialize PCS
     session.projectId = `proj-${Date.now().toString(36)}`;
     const state: PCSState = createPCSState({
       phase: 'clarifying',
@@ -179,97 +176,53 @@ export function startConversationLoop(): void {
     session.manager = new PCSManager(state);
     trace('PCS', `Project ${session.projectId} initialized`);
 
-    // Creative Type Routing
-    const routing = classifyCreativeType(idea);
-    session.creativeType = routing.type;
-    const typeLabel = CREATIVE_TYPE_LABELS[routing.type];
+    // Intent Understanding (replaces old Router)
+    const interpretation = interpretIntent(idea);
+    const hypotheses = generateHypotheses(idea);
+
+    // Debug traces
     trace(
-      'ROUTER',
-      `Detected: ${typeLabel.emoji} ${typeLabel.label} (${Math.round(routing.confidence * 100)}%)`,
+      'UNDERSTAND',
+      `Primary: ${ARTIFACT_LABELS[interpretation.primaryArtifact.type]} (${Math.round(interpretation.primaryArtifact.confidence * 100)}%)`,
     );
-    trace('ROUTER', `Signals: ${routing.signals.join(', ') || '无明确信号'}`);
-    trace('ROUTER', `Explanation: ${routing.explanation}`);
+    trace('UNDERSTAND', `Topic: ${interpretation.topic}`);
+    trace('UNDERSTAND', `Unknowns: ${interpretation.unknowns.join(', ')}`);
 
-    // Load type-specific clarification schema
-    const schema = getClarificationSchema(routing.type);
-    session.clarifyDims = schema.dimensions;
-    trace('SCHEMA', `Loaded: ${schema.type} — ${session.clarifyDims.length} dimensions`);
+    // Show rejected types
+    for (const r of interpretation.rejectedTypes) {
+      trace('REJECTED', `${ARTIFACT_LABELS[r.type]}: ${r.reason}`);
+    }
 
-    // Full project classification
-    const classification = classifyProject(idea);
+    // Show hypotheses
+    for (const h of hypotheses.hypotheses) {
+      trace(
+        'HYPOTHESIS',
+        `${ARTIFACT_LABELS[h.artifactType]}: ${h.possibleDirections[0]} (${Math.round(h.confidence * 100)}%)`,
+      );
+    }
+
+    // Select best question using information gain
+    const bestQ = selectBestQuestion(interpretation);
     trace(
-      'CLASSIFY',
-      `Maturity: ${classification.maturity} | Workflow: ${classification.workflow}`,
+      'QUESTION',
+      `Score: ${Math.round(bestQ.score * 100)} | Impact: ${Math.round(bestQ.impact * 100)}% | Gain: ${Math.round(bestQ.informationGain * 100)}%`,
     );
-    trace('CLASSIFY', `Known: ${classification.knowns.join(', ') || '无'}`);
-    trace('CLASSIFY', `Unknown: ${classification.unknowns.join(', ') || '无'}`);
-
-    // Create initial artifact
-    const artifact = artifactBuilder.createIdeaArtifact(idea, classification);
-    trace('ARTIFACT', `Stage: ${artifact.stage} → ${artifact.conversationSummary.slice(0, 80)}`);
+    trace('QUESTION', `Reason: ${bestQ.addresses}`);
 
     say(`\n收到："${idea}"`);
-    say(`\n${typeLabel.emoji} 我理解：你想创作一个 ${typeLabel.label}`);
-    if (routing.signals.length > 0) {
-      say(`   检测到关键词: ${routing.signals.join('、')}`);
-    }
-    say(`\n${schema.intro}`);
+    say(
+      `\n💡 ${ARTIFACT_LABELS[interpretation.primaryArtifact.type]} · 主题: "${interpretation.topic}"`,
+    );
+    say(`   ${interpretation.explanation}`);
+    say(`\n${hypotheses.nextQuestion.text}`);
 
-    showClarifyQuestion();
-  }
-
-  function showClarifyQuestion(): void {
-    const dim = session.clarifyDims[session.clarifyIdx];
-    if (!dim) return;
-
-    const total = session.clarifyDims.length;
-    divider(`${session.clarifyIdx + 1}/${total}  ${dim.label}`);
-    dim.options.forEach((opt, i) => console.log(`  ${i + 1}. ${opt}`));
-    if (dim.hint) say(`\n  💡 ${dim.hint}`);
-    say('\n选择编号或直接输入自定义内容 (/skip 跳过 /back 返回上一项)');
-    prompt();
-  }
-
-  function handleClarifyAnswer(input: string): void {
-    const dim = session.clarifyDims[session.clarifyIdx];
-    if (!dim || !session.manager) return;
-
-    let value = input;
-    if (input === '/skip') {
-      value = dim.options[0] || '';
-    } else if (input === '/back' && session.clarifyIdx > 0) {
-      session.clarifyIdx--;
-      showClarifyQuestion();
-      return;
-    } else {
-      const num = parseInt(input, 10);
-      if (!isNaN(num) && num >= 1 && num <= dim.options.length) value = dim.options[num - 1];
-    }
-
-    // Write to PCS
-    const result = session.manager.writeField(dim.field, value, 'user');
-    trace('FIELD', `${dim.field} = "${value}" ${result.success ? '✓' : '✗'}`);
-
-    // Analyze input type
-    const analysis = analyzeInput(input, session.messages);
-    if (analysis.class !== 'new_info' && analysis.class !== 'affirmation') {
-      trace(
-        'INPUT',
-        `Classified as: ${analysis.class} (${Math.round(analysis.confidence * 100)}%)`,
+    if (hypotheses.nextQuestion.options.length > 0) {
+      hypotheses.nextQuestion.options.forEach((opt: string, i: number) =>
+        console.log(`  ${i + 1}. ${opt}`),
       );
-      if (analysis.correctsField) trace('CORRECT', `Field: ${analysis.correctsField}`);
-      if (analysis.conflictsWith) trace('CONFLICT', `With: ${analysis.conflictsWith}`);
     }
 
-    addMessage('assistant', `${dim.label}: ${value}`);
-    say(`  ✅ ${dim.label} → ${value}`);
-
-    session.clarifyIdx++;
-    if (session.clarifyIdx >= session.clarifyDims.length) {
-      finishClarify();
-    } else {
-      showClarifyQuestion();
-    }
+    prompt();
   }
 
   function finishClarify(): void {
@@ -511,7 +464,34 @@ export function startConversationLoop(): void {
         break;
 
       case 'clarify':
-        handleClarifyAnswer(input);
+        if (input === '/done') {
+          finishClarify();
+          break;
+        }
+        // Refine understanding: accumulate user answers and re-interpret
+        {
+          const accumulatedIdea = session.messages
+            .filter((m) => m.role === 'user')
+            .map((m) => m.content)
+            .join(' | ');
+          const interp = interpretIntent(accumulatedIdea);
+          const hypotheses = generateHypotheses(accumulatedIdea);
+
+          trace(
+            'UNDERSTAND',
+            `Updated: ${ARTIFACT_LABELS[interp.primaryArtifact.type]} (${Math.round(interp.primaryArtifact.confidence * 100)}%)`,
+          );
+          say(`\n💡 ${ARTIFACT_LABELS[interp.primaryArtifact.type]} · 主题: "${interp.topic}"`);
+          say(`   ${interp.explanation}`);
+          say(`\n${hypotheses.nextQuestion.text}`);
+          if (hypotheses.nextQuestion.options.length > 0) {
+            hypotheses.nextQuestion.options.forEach((opt: string, i: number) =>
+              console.log(`  ${i + 1}. ${opt}`),
+            );
+          }
+          say('\n输入 /done 完成需求确认');
+          prompt();
+        }
         break;
 
       case 'blueprint': {
