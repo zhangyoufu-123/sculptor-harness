@@ -18,6 +18,7 @@ import {
 } from '@/runtime/discovery/hypothesis-generator';
 import { excavateMemories, type MemoryAsset } from '@/runtime/discovery/memory-excavator';
 import { assessReadiness } from '@/runtime/discovery/creative-director';
+import { reflectConsensus } from '@/runtime/discovery/consensus-engine';
 import {
   extractCreativeAssets,
   createCreativeMemory,
@@ -99,7 +100,28 @@ export class SculptorOrchestrator {
     // Step 1: Extract creative assets (metaphors, decisions)
     extractCreativeAssets(input, this.state.creativeMemory);
 
-    // Step 2: Generate competing hypotheses
+    // Consensus Reflection: validate shared understanding FIRST
+    // Only do this on the first interaction (when no hypotheses exist yet)
+    if (this.state.hypotheses.length === 0) {
+      const consensus = await reflectConsensus(input);
+      this.state.hypotheses = [
+        {
+          interpretation: consensus.understanding,
+          confidence: consensus.confidence,
+          evidence: consensus.signals.map((s) => s.evidence),
+          validationQuestion: consensus.signals[0]?.verificationQuestion || '',
+          direction: consensus.understanding,
+        },
+      ];
+
+      // Record detected signals as hypotheses
+      for (const signal of consensus.signals) {
+        this.state.belief.artifact.evidence.push(signal.detected);
+      }
+
+      return consensus.reflection;
+    }
+    // Existing flow (only for interactions AFTER the first one)
     const history = this.state.messages
       .slice(-8)
       .map((m) => `${m.role}: ${m.content}`)

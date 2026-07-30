@@ -74,7 +74,8 @@ export async function generateHypotheses(
   conversationContext?: string,
 ): Promise<HypothesisSet> {
   const prompt = `用户说: "${input}"
-${conversationContext ? `对话上下文: ${conversationContext}` : ''}`;
+${conversationContext ? `对话上下文: ${conversationContext}` : ''}
+请以JSON格式输出你的假设分析。`;
 
   try {
     const response = await getLLM().completeWithRetry({

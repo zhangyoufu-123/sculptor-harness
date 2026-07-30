@@ -75,7 +75,8 @@ export async function excavateMemories(
 ): Promise<ExcavationResult> {
   const prompt = `用户素材: "${input}"
 已有素材: ${JSON.stringify(existingAssets.slice(0, 5))}
-${context ? `创作上下文: ${context}` : ''}`;
+${context ? `创作上下文: ${context}` : ''}
+请以JSON格式输出你的素材分析。`;
 
   try {
     const response = await getLLM().completeWithRetry({
