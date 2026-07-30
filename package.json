@@ -13,7 +13,7 @@
     "test:e2e": "playwright test",
     "prepare": "husky",
     "check-constraints": "tsx scripts/check-constraints.ts",
-    "sculptor": "tsx src/cli/sculptor-cli.ts",
+    "sculptor": "tsx src/console/sculptor.ts",
     "sculptor:test": "tsx src/cli/sculptor-cli.ts run --full-pipeline"
   },
   "lint-staged": {
