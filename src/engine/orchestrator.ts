@@ -38,8 +38,10 @@ import {
   type CreativeMemory,
 } from '@/runtime/creative-memory';
 import {
-  generateSocraticPrompts,
   shouldTriggerSocratic,
+  detectUserIntent,
+  decideClarification,
+  generatePerspectiveQuestions,
 } from '@/runtime/discovery/socratic-engine';
 
 let _llm: LLMClient | null = null;
@@ -163,7 +165,43 @@ export class SculptorOrchestrator {
     // Step 1: Extract creative assets (metaphors, decisions)
     extractCreativeAssets(input, this.state.creativeMemory);
 
-    // Socratic mode: help user discover ideas when stuck or early in conversation
+    // Consensus Reflection: validate shared understanding FIRST
+    // Only do this on the first interaction (when no hypotheses exist yet)
+    if (this.state.hypotheses.length === 0) {
+      const history = this.state.messages
+        .slice(-4)
+        .map((m) => `${m.role}: ${m.content.slice(0, 80)}`)
+        .join('\n');
+      const consensus = await reflectConsensus(input, history);
+      this.state.hypotheses = [
+        {
+          interpretation: consensus.understanding,
+          confidence: consensus.confidence,
+          evidence: consensus.signals.map((s) => s.evidence),
+          validationQuestion: consensus.signals[0]?.verificationQuestion || '',
+          direction: consensus.understanding,
+        },
+      ];
+
+      // Record detected signals as hypotheses
+      for (const signal of consensus.signals) {
+        this.state.belief.artifact.evidence.push(signal.detected);
+      }
+
+      return consensus.reflection;
+    }
+
+    // Intent detection: is user exploratory or goal-oriented?
+    const intent = detectUserIntent(this.state.messages, this.state.belief.roundCount);
+
+    // If user is goal-oriented and we have enough understanding, suggest outline
+    if (intent.mode === 'goal_oriented' && this.state.belief.overallConfidence > 0.5) {
+      const readyMsg = `方向已经很清晰了！${intent.reasoning}。\n输入 /outline 生成大纲，或继续讨论。`;
+      this.state.messages.push({ role: 'assistant', content: readyMsg });
+      return readyMsg;
+    }
+
+    // Smart clarification: use the JSON clarifier pattern from NVIDIA aiq
     if (
       shouldTriggerSocratic(
         input,
@@ -171,27 +209,32 @@ export class SculptorOrchestrator {
         this.state.belief.overallConfidence,
       )
     ) {
-      const socratic = await generateSocraticPrompts({
-        userInput: input,
-        currentUnderstanding: getBeliefContext(this.state.belief),
-        creativeType: this.state.belief.artifact.value,
-        interactionCount: this.state.belief.roundCount,
-      });
+      const clarification = await decideClarification(
+        input,
+        getBeliefContext(this.state.belief),
+        this.state.belief.roundCount,
+      );
 
-      if (socratic.prompts.length > 0) {
-        const socraticResponse = [
-          `💡 ${socratic.analysis}`,
+      if (clarification.needsClarification && clarification.question) {
+        // Use perspective-guided questions as options
+        const perspectives = generatePerspectiveQuestions(
+          this.state.belief.topic.value,
+          this.state.belief.artifact.value,
+        );
+
+        const response = [
+          `💡 ${clarification.reasoning}`,
           '',
-          ...socratic.prompts.map((p, i) => `${i + 1}. ${p.text}`),
-          socratic.unexploredTerritory.length > 0
-            ? `\n🔍 尚未探索: ${socratic.unexploredTerritory.join(' | ')}`
-            : '',
-        ]
-          .filter(Boolean)
-          .join('\n');
+          `❓ ${clarification.question}`,
+          '',
+          '📐 也可以从这些角度思考:',
+          ...perspectives
+            .slice(0, 3)
+            .map((p) => `  • ${p.perspective}: ${p.question.slice(0, 50)}...`),
+        ].join('\n');
 
-        this.state.messages.push({ role: 'assistant', content: socraticResponse });
-        return socraticResponse;
+        this.state.messages.push({ role: 'assistant', content: response });
+        return response;
       }
     }
 
@@ -225,32 +268,6 @@ export class SculptorOrchestrator {
         `主题: ${this.state.belief.topic.value}`,
       );
       this.state.memories.push(...excavation.assets.filter((a) => a.confirmed));
-    }
-
-    // Consensus Reflection: validate shared understanding FIRST
-    // Only do this on the first interaction (when no hypotheses exist yet)
-    if (this.state.hypotheses.length === 0) {
-      const history = this.state.messages
-        .slice(-4)
-        .map((m) => `${m.role}: ${m.content.slice(0, 80)}`)
-        .join('\n');
-      const consensus = await reflectConsensus(input, history);
-      this.state.hypotheses = [
-        {
-          interpretation: consensus.understanding,
-          confidence: consensus.confidence,
-          evidence: consensus.signals.map((s) => s.evidence),
-          validationQuestion: consensus.signals[0]?.verificationQuestion || '',
-          direction: consensus.understanding,
-        },
-      ];
-
-      // Record detected signals as hypotheses
-      for (const signal of consensus.signals) {
-        this.state.belief.artifact.evidence.push(signal.detected);
-      }
-
-      return consensus.reflection;
     }
     // Existing flow (only for interactions AFTER the first one)
     const history = this.state.messages
