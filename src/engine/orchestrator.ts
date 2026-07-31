@@ -27,6 +27,11 @@ import {
 import { assessReadiness } from '@/runtime/discovery/creative-director';
 import { reflectConsensus } from '@/runtime/discovery/consensus-engine';
 import {
+  generateHierarchicalOutline,
+  displayHierarchicalOutline,
+  shouldUseHierarchical,
+} from '@/runtime/discovery/hierarchical-outline';
+import {
   extractCreativeAssets,
   createCreativeMemory,
   buildWritingContext,
@@ -93,6 +98,27 @@ export class SculptorOrchestrator {
 
     // Handle /outline command
     if (userInput.startsWith('/outline')) {
+      // Hierarchical outline for long-form works (novel, 长篇)
+      if (shouldUseHierarchical(this.state.belief.artifact.value)) {
+        const hierOutline = await generateHierarchicalOutline({
+          artifactType: this.state.belief.artifact.value,
+          topic: this.state.belief.topic.value,
+          purpose: this.state.belief.intent.value,
+          audience: this.state.belief.audience.value,
+          tone: this.state.belief.tone.value,
+          summary: getBeliefContext(this.state.belief),
+        });
+        this.state.outline = hierOutline.flatList.map((n) => ({
+          title: n.title,
+          goal: n.goal,
+        }));
+        this.state.phase = 'outline';
+        return (
+          displayHierarchicalOutline(hierOutline.root!) +
+          '\n\n这个结构可以吗？输入 "确认" 开始写作。'
+        );
+      }
+
       const outlineResult = await planStructure({
         artifactType: this.state.belief.artifact.value,
         topic: this.state.belief.topic.value,
@@ -219,6 +245,34 @@ export class SculptorOrchestrator {
 
     // Step 5: If ready for outline, generate it
     if (readiness.canOutline) {
+      // Hierarchical outline for long-form works (novel, 长篇)
+      if (shouldUseHierarchical(this.state.belief.artifact.value)) {
+        const hierOutline = await generateHierarchicalOutline({
+          artifactType: this.state.belief.artifact.value,
+          topic: this.state.belief.topic.value,
+          purpose: this.state.belief.intent.value,
+          audience: this.state.belief.audience.value,
+          tone: this.state.belief.tone.value,
+          summary: `${getBeliefContext(this.state.belief)}\n\n${buildWritingContext(this.state.creativeMemory)}`,
+        });
+        this.state.outline = hierOutline.flatList.map((n) => ({
+          title: n.title,
+          goal: n.goal,
+        }));
+        // Update incremental outline too
+        this.state.incOutline = hierOutline.flatList.map((n) => ({
+          title: n.title,
+          goal: n.goal,
+          status: 'confirmed' as const,
+          addedAt: new Date().toISOString(),
+        }));
+        this.state.phase = 'outline';
+        return (
+          displayHierarchicalOutline(hierOutline.root!) +
+          '\n\n这个结构可以吗？输入 "确认" 开始写作，或告诉我需要调整的地方。'
+        );
+      }
+
       const outlineResult = await planStructure({
         artifactType: this.state.belief.artifact.value,
         topic: this.state.belief.topic.value,
@@ -341,6 +395,23 @@ ${this.state.memories
     }
 
     // User wants to adjust — regenerate via LLM
+    // Hierarchical outline for long-form works (novel, 长篇)
+    if (shouldUseHierarchical(this.state.belief.artifact.value)) {
+      const hierOutline = await generateHierarchicalOutline({
+        artifactType: this.state.belief.artifact.value,
+        topic: this.state.belief.topic.value,
+        purpose: this.state.belief.intent.value,
+        audience: this.state.belief.audience.value,
+        tone: this.state.belief.tone.value,
+        summary: getBeliefContext(this.state.belief) + `\n用户反馈: ${input}`,
+      });
+      this.state.outline = hierOutline.flatList.map((n) => ({
+        title: n.title,
+        goal: n.goal,
+      }));
+      return displayHierarchicalOutline(hierOutline.root!) + '\n\n调整后的层级结构。确认开始写作？';
+    }
+
     const result = await planStructure({
       artifactType: this.state.belief.artifact.value,
       topic: this.state.belief.topic.value,

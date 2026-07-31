@@ -7,6 +7,7 @@
  */
 
 import { LLMClient } from '@/lib/llm-client';
+import { getGenreCorpus } from '@/runtime/rag/genre-store';
 
 export interface ThinkingStep {
   /** What the AI is thinking about */
@@ -28,6 +29,17 @@ export interface ThinkingTrace {
   action: string;
   /** Whether to show this to the user */
   visible: boolean;
+}
+
+// Generate genre context dynamically from the corpus
+function buildGenreContext(): string {
+  const genres = getGenreCorpus();
+  return genres
+    .map(
+      (g) =>
+        `- ${g.name} (${g.category}): ${g.description.slice(0, 40)}... | 信号: ${g.keywords.slice(0, 3).join(', ')} | 区分: ${g.distinguishingFeatures[0]}`,
+    )
+    .join('\n');
 }
 
 const THINKING_PROMPT = `你是 Sculptor 创作助手的思考模块。分析当前对话状态，自主决定最优行动路径。
@@ -67,14 +79,14 @@ const THINKING_PROMPT = `你是 Sculptor 创作助手的思考模块。分析当
 - generate_outline — 理解充分，可以生成大纲
 - recover — 对话跑偏，需要回到正轨
 
+## 文体参考（动态生成，仅作参考）
+${buildGenreContext()}
+
 ## 必守规则
-1. 用户说"论文"+"哲学" → 智识讨论，绝不挖掘记忆
-2. 用户说"小说"+"人物" → 探索虚构，不是智识讨论
-3. 用户说"回忆"+"小时候" → 挖掘记忆
-4. 用户说"教程"+"学会" → 教学内容
-5. "议论文"≠"学术论文" — 议论文是观点文章，不是研究
-6. 所有类型平等 — 不存在默认类型
-7. 不确定时优先 explore_meaning
+1. 以上文体分类仅供参考，不要机械匹配关键词
+2. 优先根据用户的整体语义判断，而不是单个词
+3. "议论文"≠"学术论文" — 议论文是观点文章
+4. 不确定时优先 explore_meaning
 
 输出JSON，思考步骤2-4个:
 
