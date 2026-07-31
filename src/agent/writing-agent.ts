@@ -3,6 +3,14 @@ import { buildWritingContext, factStore } from '@/runtime/creative-memory';
 import { getBeliefContext } from '@/runtime/belief-revision';
 import type { BeliefState } from '@/runtime/belief-revision';
 import type { CreativeMemory } from '@/runtime/creative-memory';
+import {
+  createStyleFingerprint,
+  recordResistance,
+  recordAssociation,
+  getCompactStyleConstraints,
+  type StyleFingerprint,
+} from '@/runtime/style/style-fingerprint';
+import { critiqueStyle, detectAverageness } from '@/runtime/style/style-critic';
 import { normalizeUncertainties } from '@/runtime/parse-output';
 import {
   createPhaseGate,
@@ -37,6 +45,7 @@ export class WritingAgent {
   private discoverySummary: string;
   private phaseGate: PhaseGateState;
   private materialChecklist: MaterialChecklist;
+  private styleFingerprint: StyleFingerprint;
 
   constructor(config: {
     belief: BeliefState;
@@ -80,6 +89,7 @@ export class WritingAgent {
     };
     this.phaseGate = createPhaseGate(3);
     this.materialChecklist = createMaterialChecklist(config.belief.artifact.value || '散文');
+    this.styleFingerprint = createStyleFingerprint();
   }
 
   async handle(
@@ -301,6 +311,35 @@ export class WritingAgent {
       draft.versions.push(version);
       draft.activeVersionIndex = draft.versions.length - 1;
       this.state.currentDraft = draft;
+      // Style check for high-confidence fingerprints
+      if (this.styleFingerprint.confidence > 0.4) {
+        const critique = await critiqueStyle(content, this.styleFingerprint);
+        if (critique.needsRewrite && critique.averageness.score > 0.6) {
+          // Auto-rewrite with style constraints
+          const rewrittenPrompt = `原文:
+${content}
+
+风格改进要求:
+${critique.rewriteInstructions}
+
+请重写，保持原意但更符合风格。`;
+          const rewriteResp = await this.llm.completeWithRetry({
+            systemPrompt: '根据风格批评重写内容。',
+            prompt: rewrittenPrompt,
+            temperature: 0.5,
+            maxTokens: 2000,
+          });
+          if (rewriteResp.text) {
+            version.content = rewriteResp.text;
+            version.notes += ' | 风格优化';
+          }
+        }
+      }
+      // Quick averageness check (rule-based, free)
+      const avg = detectAverageness(version.content);
+      if (avg.isGeneric) {
+        version.notes += ` | ⚠️ 检测到${avg.phrases.length}个通用表达`;
+      }
       // Use normalized uncertainties for display
       const safeUncertainties = normalizeUncertainties(uncertainties);
       if (safeUncertainties.length > 0) {
@@ -359,6 +398,11 @@ export class WritingAgent {
         draft.versions.push(version);
         draft.activeVersionIndex = draft.versions.length - 1;
         this.state.currentDraft = draft;
+        // Quick averageness check (rule-based, free)
+        const avg = detectAverageness(content);
+        if (avg.isGeneric) {
+          version.notes += ` | ⚠️ 检测到${avg.phrases.length}个通用表达`;
+        }
         this.state.state = 'PRESENTING';
         return `✍️ ${this.progress()} ${section.title}\n\n${content}\n\n/accept 确认 /edit <修改> /retry`;
       } catch {
@@ -399,6 +443,8 @@ export class WritingAgent {
     const draft = this.state.sectionDrafts.get(this.state.currentSectionIndex);
     if (!draft) return '无内容';
     const cur = draft.versions[draft.activeVersionIndex]?.content || '';
+    // Learn from user edit: what did they replace?
+    recordAssociation(this.styleFingerprint, cur.slice(0, 80), instruction.slice(0, 80));
     const resp = await this.llm.completeWithRetry({
       systemPrompt: '根据指令修改内容，只输出修改后的版本。',
       prompt: `原文: ${cur}\n指令: ${instruction}`,
@@ -427,6 +473,21 @@ export class WritingAgent {
     const draft = this.state.sectionDrafts.get(this.state.currentSectionIndex);
     if (!draft) return '无内容';
     const cur = draft.versions[draft.activeVersionIndex]?.content || '';
+    // Learn from user feedback
+    if (
+      feedback.includes('空泛') ||
+      feedback.includes('太AI') ||
+      feedback.includes('像机器') ||
+      feedback.includes('生硬')
+    ) {
+      recordResistance(this.styleFingerprint, cur.slice(0, 80), 'generic');
+    }
+    if (feedback.includes('太正式') || feedback.includes('太学术')) {
+      recordResistance(this.styleFingerprint, cur.slice(0, 80), 'overly_formal');
+    }
+    if (feedback.includes('太口语') || feedback.includes('太随意')) {
+      recordResistance(this.styleFingerprint, cur.slice(0, 80), 'overly_casual');
+    }
     const resp = await this.llm.completeWithRetry({
       systemPrompt: '根据反馈修改内容，只输出修改后的版本。',
       prompt: `原文: ${cur}\n反馈: ${feedback}`,
@@ -627,6 +688,11 @@ export class WritingAgent {
     }
     if (this.discoverySummary) {
       ctx.creativeDNA += '\n\n## 已确认信息\n' + this.discoverySummary.slice(0, 300);
+    }
+    // Inject style fingerprint constraints
+    const styleConstraints = getCompactStyleConstraints(this.styleFingerprint);
+    if (styleConstraints) {
+      ctx.creativeDNA += '\n\n' + styleConstraints;
     }
     return ctx;
   }
