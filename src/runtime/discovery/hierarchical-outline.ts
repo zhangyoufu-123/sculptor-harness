@@ -267,5 +267,17 @@ export function displayHierarchicalOutline(root: OutlineNode, indent = 0): strin
 
 /** Check whether a hierarchical outline is appropriate for the given artifact type */
 export function shouldUseHierarchical(artifactType: string): boolean {
-  return artifactType.includes('小说') || artifactType.includes('长篇');
+  // Long-form types always use hierarchy
+  if (artifactType.includes('小说') || artifactType.includes('长篇')) return true;
+  // Prose/散文, tutorials, academic papers benefit from sub-sections
+  if (
+    artifactType.includes('散文') ||
+    artifactType.includes('教程') ||
+    artifactType.includes('论文') ||
+    artifactType.includes('学术') ||
+    artifactType.includes('课程') ||
+    artifactType.includes('指南')
+  )
+    return true;
+  return false;
 }
