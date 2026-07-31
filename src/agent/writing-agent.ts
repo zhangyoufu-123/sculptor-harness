@@ -62,7 +62,6 @@ export class WritingAgent {
     const input = userInput.trim();
     if (this.detectOutlineChange(input)) {
       this.state.generationMetrics.outlineChanges++;
-      this.state.state = 'MID_STREAM_EDIT';
       return {
         response: await this.handleOutlineChange(input),
         phase: 'writing',
@@ -124,6 +123,14 @@ export class WritingAgent {
           return { response: '🎉 创作完成！', phase: 'done', outlineChanged: false };
         return {
           response: '全部完成。输入 /polish 读者模拟 或 /done 结束',
+          phase: 'writing',
+          outlineChanged: false,
+        };
+      case 'MID_STREAM_EDIT':
+        // After outline change, return to idle so user can continue
+        this.state.state = 'WRITING_IDLE';
+        return {
+          response: '大纲已更新。输入 /gen 继续生成。',
           phase: 'writing',
           outlineChanged: false,
         };

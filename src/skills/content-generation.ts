@@ -60,6 +60,7 @@ ${input.nextSectionTitle ? `下一节: ${input.nextSectionTitle}` : ''}`;
     const response = await getLLM().completeWithRetry({
       systemPrompt: GENERATION_PROMPT,
       prompt,
+      responseFormat: 'json',
       temperature: 0.7,
       maxTokens: 2000,
     });

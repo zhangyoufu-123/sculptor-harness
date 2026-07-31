@@ -8,12 +8,11 @@ config({ path: resolve(process.cwd(), '.env.local') });
 /**
  * Sculptor Console — Agent Collaboration Cluster
  *
- * Uses SculptorOrchestrator for discovery/outline,
- * then hands off to conversation-loop for writing.
+ * All phases (discovery → outline → writing → done)
+ * flow through the SculptorOrchestrator in a single readline loop.
  */
 
 import { SculptorOrchestrator } from '@/engine/orchestrator';
-import { startWritingPhase } from './runtime/conversation-loop';
 
 const args = process.argv.slice(2);
 
@@ -59,12 +58,11 @@ async function main() {
       const reply = await _orchestrator!.processInput(text);
       console.log(`\n${reply}`);
 
-      // Check if ready for writing phase
+      // ALL phases go through the orchestrator — no separate writing path
       const state = _orchestrator!.getState();
-      if (state.phase === 'writing') {
-        console.log('\n进入写作阶段...');
+      if (state.phase === 'done') {
+        console.log('\n👋 创作完成！\n');
         rl.close();
-        startWritingPhase(state);
         return;
       }
     } finally {
