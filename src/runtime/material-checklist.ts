@@ -24,36 +24,53 @@ export interface MaterialChecklist {
 }
 
 const CATEGORY_LABELS: Record<MaterialCategory, string> = {
-  core_memory: '核心记忆/场景',
-  emotional_tone: '情感基调',
-  symbolic_element: '象征物/隐喻',
-  concrete_detail: '具体感官细节',
-  reader_connection: '读者连接',
+  core_memory: '核心论点/主题',
+  emotional_tone: '论证方向/立场',
+  symbolic_element: '理论框架/象征',
+  concrete_detail: '具体论据/案例',
+  reader_connection: '读者/学术贡献',
 };
 
 /**
  * Create a checklist based on creative type.
+ * Different types need different material categories.
  */
 export function createMaterialChecklist(creativeType: string): MaterialChecklist {
-  // All types need at least 3 categories
-  const required: MaterialCategory[] = ['core_memory', 'emotional_tone', 'concrete_detail'];
+  let required: MaterialCategory[] = [];
 
-  // Fiction/prose need symbolic elements
   if (
+    creativeType.includes('论文') ||
+    creativeType.includes('学术') ||
+    creativeType.includes('研究') ||
+    creativeType.includes('分析')
+  ) {
+    // Academic: need thesis, evidence, structure — NOT sensory details
+    required = ['core_memory', 'emotional_tone', 'reader_connection'];
+  } else if (
     creativeType.includes('散文') ||
     creativeType.includes('小说') ||
-    creativeType.includes('故事')
+    creativeType.includes('故事') ||
+    creativeType.includes('回忆')
   ) {
-    required.push('symbolic_element');
-  }
-
-  // Articles/essays need reader connection
-  if (
+    // Creative: need sensory details, emotional tone, metaphors
+    required = ['core_memory', 'emotional_tone', 'concrete_detail', 'symbolic_element'];
+  } else if (
+    creativeType.includes('教程') ||
+    creativeType.includes('教学') ||
+    creativeType.includes('指南')
+  ) {
+    // Tutorial: need topic clarity, audience, examples
+    required = ['core_memory', 'emotional_tone', 'concrete_detail'];
+  } else if (
     creativeType.includes('文章') ||
-    creativeType.includes('论文') ||
-    creativeType.includes('博客')
+    creativeType.includes('博客') ||
+    creativeType.includes('公众号')
   ) {
-    required.push('reader_connection');
+    // Blog: need core message + reader connection
+    required = ['core_memory', 'emotional_tone', 'reader_connection'];
+  } else {
+    // Default: minimum requirements
+    required = ['core_memory', 'emotional_tone'];
   }
 
   return { items: [], requiredCategories: required, completion: 0 };
@@ -87,6 +104,52 @@ export function recordMaterial(
  * Try to auto-extract material from user input.
  */
 export function extractMaterial(checklist: MaterialChecklist, input: string): void {
+  // BROAD academic detection — must come FIRST
+  const academicWords = [
+    '论文',
+    '学术',
+    '研究',
+    '分析',
+    '批判',
+    '论证',
+    '理论',
+    '框架',
+    '算法',
+    '文化',
+    '认知',
+    '技术',
+    '语言',
+    '传播',
+    '模因',
+    '媒体',
+    '现象',
+    '问题',
+    '观点',
+    '立场',
+    '角度',
+    '维度',
+    '层面',
+    '结构',
+    '逻辑',
+  ];
+  const hasAcademicSignal = academicWords.some((w) => input.includes(w));
+
+  if (hasAcademicSignal) {
+    // Auto-fill core categories for academic work
+    if (!checklist.items.some((i) => i.category === 'core_memory')) {
+      recordMaterial(checklist, 'core_memory', input.slice(0, 200));
+    }
+    if (!checklist.items.some((i) => i.category === 'emotional_tone')) {
+      recordMaterial(checklist, 'emotional_tone', `学术分析方向: ${input.slice(0, 150)}`);
+    }
+    if (
+      !checklist.items.some((i) => i.category === 'reader_connection') &&
+      checklist.requiredCategories.includes('reader_connection')
+    ) {
+      recordMaterial(checklist, 'reader_connection', '学术读者');
+    }
+  }
+
   // Core memory: user mentions a specific time/place/person
   if (
     input.includes('外婆') ||

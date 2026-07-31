@@ -56,6 +56,10 @@ export function canAct(gate: PhaseGateState, action: string): string | null {
     }
   }
 
+  if (gate.phase === 'DRAFTING' || gate.phase === 'COMPLETE') {
+    return null; // All actions allowed in drafting phase
+  }
+
   // DRAFTING: everything allowed
   return null; // allowed
 }

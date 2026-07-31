@@ -608,6 +608,53 @@ ${this.state.memories
   // =========================================================================
 
   private async handleOutline(input: string): Promise<string> {
+    // CHECK CONFIRMATION FIRST — before anything else
+    if (
+      input.includes('确认') ||
+      input.includes('开始') ||
+      input.includes('好') ||
+      input === 'ok' ||
+      input === 'OK'
+    ) {
+      this.state.phase = 'writing';
+      this.state.currentSection = 0;
+      this.writingAgent = null;
+      return [
+        `✅ 进入写作阶段`,
+        ``,
+        `📋 创作概要:`,
+        `  类型: ${this.state.belief.artifact.value || '文章'}`,
+        `  主题: ${this.state.belief.topic.value}`,
+        `  读者: ${this.state.belief.audience.value || '未指定'}`,
+        `  语气: ${this.state.belief.tone.value || '未指定'}`,
+        ``,
+        `📐 大纲 (${this.state.outline.length} 节):`,
+        ...this.state.outline.map((s, i) => `  ${i + 1}. ${s.title} — ${s.goal}`),
+        ``,
+        `输入 /gen 生成内容`,
+      ].join('\n');
+    }
+
+    // THEN check for dissatisfaction
+    if (
+      input.includes('不行') ||
+      input.includes('不对') ||
+      input.includes('重新') ||
+      input.includes('再讨论')
+    ) {
+      const response = await getLLM().completeWithRetry({
+        systemPrompt: '你是创作顾问。当用户对大纲不满意时，你先分析原因，再提出方向。',
+        prompt: `用户对大纲不满意: "${input}"
+当前大纲: ${this.state.outline.map((s, i) => `${i + 1}. ${s.title} — ${s.goal}`).join('\n')}
+创作记忆: ${buildWritingContext(this.state.creativeMemory)}
+请分析用户可能不满意的原因，提出2-3个更接近用户意图的方向。`,
+        temperature: 0.5,
+        maxTokens: 500,
+      });
+      return response.text || '我理解了你的不满意。能告诉我具体哪里不符合你的想法吗？';
+    }
+
+    // THEN check section-specific edits
     // Section-specific edit: "/edit-section 2 目标不够具体"
     if (input.startsWith('/edit-section')) {
       const parts = input.replace('/edit-section', '').trim().split(/\s+/);
@@ -651,49 +698,6 @@ ${this.state.memories
       const sectionNum = parseInt(naturalEditMatch[1]);
       const suggestion = naturalEditMatch[2].trim();
       return await this.handleSectionEdit(sectionNum, suggestion, true);
-    }
-
-    if (
-      input.includes('不行') ||
-      input.includes('不对') ||
-      input.includes('重新') ||
-      input.includes('再讨论')
-    ) {
-      const response = await getLLM().completeWithRetry({
-        systemPrompt: '你是创作顾问。当用户对大纲不满意时，你先分析原因，再提出方向。',
-        prompt: `用户对大纲不满意: "${input}"
-当前大纲: ${this.state.outline.map((s, i) => `${i + 1}. ${s.title} — ${s.goal}`).join('\n')}
-创作记忆: ${buildWritingContext(this.state.creativeMemory)}
-请分析用户可能不满意的原因，提出2-3个更接近用户意图的方向。`,
-        temperature: 0.5,
-        maxTokens: 500,
-      });
-      return response.text || '我理解了你的不满意。能告诉我具体哪里不符合你的想法吗？';
-    }
-
-    if (
-      input.includes('确认') ||
-      input.includes('开始') ||
-      input.includes('好') ||
-      input === 'ok'
-    ) {
-      this.state.phase = 'writing';
-      this.state.currentSection = 0;
-      this.writingAgent = null;
-      return [
-        `✅ 进入写作阶段`,
-        ``,
-        `📋 创作概要:`,
-        `  类型: ${this.state.belief.artifact.value}`,
-        `  主题: ${this.state.belief.topic.value}`,
-        `  读者: ${this.state.belief.audience.value}`,
-        `  语气: ${this.state.belief.tone.value}`,
-        ``,
-        `📐 大纲 (${this.state.outline.length} 节):`,
-        ...this.state.outline.map((s, i) => `  ${i + 1}. ${s.title} — ${s.goal}`),
-        ``,
-        `输入 /gen 生成内容，或 /outline 查看大纲`,
-      ].join('\n');
     }
 
     // User wants to adjust — regenerate via LLM
