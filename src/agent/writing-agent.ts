@@ -19,12 +19,20 @@ const getLLM = () => new LLMClient();
 export class WritingAgent {
   state: WritingAgentState;
   private llm: LLMClient;
+  private discoveryContext: string;
+  private discoverySummary: string;
 
   constructor(config: {
     belief: BeliefState;
     outline: OutlineSection[];
     creativeMemory: CreativeMemory;
+    /** Full conversation context from discovery phase */
+    conversationContext?: string;
+    /** Known facts and decisions from discovery */
+    discoverySummary?: string;
   }) {
+    this.discoveryContext = config.conversationContext || '';
+    this.discoverySummary = config.discoverySummary || '';
     this.llm = getLLM();
     const metrics: GenerationMetrics = {
       totalSections: config.outline.length,
@@ -475,6 +483,12 @@ export class WritingAgent {
     const factContext = factStore.buildContext(600);
     if (factContext) {
       ctx.creativeDNA += '\n\n' + factContext;
+    }
+    if (this.discoveryContext) {
+      ctx.creativeDNA += '\n\n## 发现阶段上下文\n' + this.discoveryContext.slice(0, 500);
+    }
+    if (this.discoverySummary) {
+      ctx.creativeDNA += '\n\n## 已确认信息\n' + this.discoverySummary.slice(0, 300);
     }
     return ctx;
   }

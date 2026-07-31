@@ -680,8 +680,20 @@ ${this.state.memories
       this.state.phase = 'writing';
       this.state.currentSection = 0;
       this.writingAgent = null;
-      const section = this.state.outline[0];
-      return `开始写作！第一节: **${section.title}** — ${section.goal}\n\n输入 /gen 让AI生成内容，或直接输入你的文字。`;
+      return [
+        `✅ 进入写作阶段`,
+        ``,
+        `📋 创作概要:`,
+        `  类型: ${this.state.belief.artifact.value}`,
+        `  主题: ${this.state.belief.topic.value}`,
+        `  读者: ${this.state.belief.audience.value}`,
+        `  语气: ${this.state.belief.tone.value}`,
+        ``,
+        `📐 大纲 (${this.state.outline.length} 节):`,
+        ...this.state.outline.map((s, i) => `  ${i + 1}. ${s.title} — ${s.goal}`),
+        ``,
+        `输入 /gen 生成内容，或 /outline 查看大纲`,
+      ].join('\n');
     }
 
     // User wants to adjust — regenerate via LLM
@@ -758,10 +770,24 @@ ${this.state.memories
 
   async handleWriting(input: string): Promise<string> {
     if (!this.writingAgent) {
+      // Build full handoff context from discovery phase
+      const handoffContext = [
+        `创作类型: ${this.state.belief.artifact.value} (${Math.round(this.state.belief.artifact.confidence * 100)}%)`,
+        `核心主题: ${this.state.belief.topic.value}`,
+        `目标读者: ${this.state.belief.audience.value}`,
+        `创作意图: ${this.state.belief.intent.value}`,
+        `语气风格: ${this.state.belief.tone.value}`,
+        `整体置信度: ${Math.round(this.state.belief.overallConfidence * 100)}%`,
+      ].join('\n');
+
+      const handoffSummary = buildWritingContext(this.state.creativeMemory);
+
       this.writingAgent = new WritingAgent({
         belief: this.state.belief,
         outline: this.state.outline.map((s) => ({ title: s.title, goal: s.goal })),
         creativeMemory: this.state.creativeMemory,
+        conversationContext: handoffContext,
+        discoverySummary: handoffSummary,
       });
       return `开始写作！共 ${this.state.outline.length} 节。\n第一节: **${this.state.outline[0].title}**\n\n输入 /gen 生成内容`;
     }
