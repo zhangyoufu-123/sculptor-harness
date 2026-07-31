@@ -48,6 +48,7 @@ import {
   decideClarification,
   generatePerspectiveQuestions,
 } from '@/runtime/discovery/socratic-engine';
+import { questionTracker } from '@/runtime/discovery/question-tracker';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -167,6 +168,12 @@ export class SculptorOrchestrator {
     // checks have an accurate round number
     this.state.belief.roundCount++;
 
+    // Record user's answer to the last asked question
+    const lastQuestion = questionTracker.getContext().history.slice(-1)[0];
+    if (lastQuestion && !lastQuestion.answer) {
+      questionTracker.recordAnswer(lastQuestion.question, input);
+    }
+
     // Step 1: Extract creative assets (metaphors, decisions)
     extractCreativeAssets(input, this.state.creativeMemory);
 
@@ -201,6 +208,16 @@ export class SculptorOrchestrator {
         },
         `共识反映: ${input.slice(0, 80)}`,
       );
+
+      // Track the question that was asked
+      const consensusQuestion = consensus.signals[0]?.verificationQuestion;
+      if (consensusQuestion) {
+        questionTracker.record({
+          question: consensusQuestion,
+          category: 'artifact_type',
+          askedBy: 'consensus',
+        });
+      }
 
       return consensus.reflection;
     }
@@ -281,6 +298,10 @@ export class SculptorOrchestrator {
       );
     }
 
+    // Build context from question tracker for smarter follow-ups
+    const trackerContext = questionTracker.buildKnownSummary();
+    const avoidAsking = questionTracker.buildAvoidList();
+
     // Smart clarification: use the JSON clarifier pattern from NVIDIA aiq
     if (
       shouldTriggerSocratic(
@@ -296,25 +317,34 @@ export class SculptorOrchestrator {
       );
 
       if (clarification.needsClarification && clarification.question) {
-        // Use perspective-guided questions as options
-        const perspectives = generatePerspectiveQuestions(
-          this.state.belief.topic.value,
-          this.state.belief.artifact.value,
-        );
+        // Don't ask if we've already covered this topic
+        if (!questionTracker.hasBeenAsked(clarification.addresses)) {
+          questionTracker.record({
+            question: clarification.question,
+            category: clarification.addresses,
+            askedBy: 'clarification',
+          });
 
-        const response = [
-          `💡 ${clarification.reasoning}`,
-          '',
-          `❓ ${clarification.question}`,
-          '',
-          '📐 也可以从这些角度思考:',
-          ...perspectives
-            .slice(0, 3)
-            .map((p) => `  • ${p.perspective}: ${p.question.slice(0, 50)}...`),
-        ].join('\n');
+          // Use perspective-guided questions as options
+          const perspectives = generatePerspectiveQuestions(
+            this.state.belief.topic.value,
+            this.state.belief.artifact.value,
+          )
+            .filter((p) => !questionTracker.hasBeenAsked(p.perspective))
+            .slice(0, 3);
 
-        this.state.messages.push({ role: 'assistant', content: response });
-        return response;
+          const response = [
+            `💡 ${clarification.reasoning}`,
+            '',
+            `❓ ${clarification.question}`,
+            '',
+            '📐 也可以从这些角度思考:',
+            ...perspectives.map((p) => `  • ${p.perspective}: ${p.question.slice(0, 50)}...`),
+          ].join('\n');
+
+          this.state.messages.push({ role: 'assistant', content: response });
+          return response;
+        }
       }
     }
 
@@ -450,7 +480,12 @@ export class SculptorOrchestrator {
 
     const response = await getLLM().completeWithRetry({
       systemPrompt: '你是创作伙伴。你的任务是与作者共同探索创作意图。',
-      prompt: `当前假设:
+      prompt: `## 已收集的信息（不要重复询问）
+${trackerContext}
+
+## 避免再次询问: ${avoidAsking.join(', ')}
+
+当前假设:
 ${this.state.hypotheses.map((h, i) => `${i + 1}. ${h.interpretation} (${Math.round(h.confidence * 100)}%)`).join('\n')}
 
 创作素材: ${this.state.memories.length} 条
