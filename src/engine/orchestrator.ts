@@ -37,6 +37,10 @@ import {
   buildWritingContext,
   type CreativeMemory,
 } from '@/runtime/creative-memory';
+import {
+  generateSocraticPrompts,
+  shouldTriggerSocratic,
+} from '@/runtime/discovery/socratic-engine';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -154,6 +158,38 @@ export class SculptorOrchestrator {
   private async handleDiscovery(input: string): Promise<string> {
     // Step 1: Extract creative assets (metaphors, decisions)
     extractCreativeAssets(input, this.state.creativeMemory);
+
+    // Socratic mode: help user discover ideas when stuck or early in conversation
+    if (
+      shouldTriggerSocratic(
+        input,
+        this.state.belief.roundCount,
+        this.state.belief.overallConfidence,
+      )
+    ) {
+      const socratic = await generateSocraticPrompts({
+        userInput: input,
+        currentUnderstanding: getBeliefContext(this.state.belief),
+        creativeType: this.state.belief.artifact.value,
+        interactionCount: this.state.belief.roundCount,
+      });
+
+      if (socratic.prompts.length > 0) {
+        const socraticResponse = [
+          `💡 ${socratic.analysis}`,
+          '',
+          ...socratic.prompts.map((p, i) => `${i + 1}. ${p.text}`),
+          socratic.unexploredTerritory.length > 0
+            ? `\n🔍 尚未探索: ${socratic.unexploredTerritory.join(' | ')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        this.state.messages.push({ role: 'assistant', content: socraticResponse });
+        return socraticResponse;
+      }
+    }
 
     // Let the LLM THINK about what to do next
     // (replaces hardcoded keyword-based mode detection)

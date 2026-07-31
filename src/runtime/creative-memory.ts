@@ -65,6 +65,110 @@ export interface CreativeMemory {
   sessionId: string;
 }
 
+// =========================================================================
+// Fact/Lore Database — for long-form cross-section consistency
+// =========================================================================
+
+/**
+ * A fact established during writing that later sections may reference.
+ * E.g., "the protagonist is named Zhang Wei", "the company was founded in 2018".
+ */
+export interface CreativeFact {
+  id: string;
+  /** What was established */
+  fact: string;
+  /** Which section established this fact */
+  sectionId: string;
+  /** Which section title */
+  sectionTitle: string;
+  /** Category for retrieval */
+  category: 'character' | 'plot' | 'setting' | 'data' | 'rule' | 'quote';
+  /** When this was recorded */
+  recordedAt: string;
+  /** Whether this fact is still canon (hasn't been retconned) */
+  active: boolean;
+}
+
+/**
+ * Store creative facts for cross-section reference.
+ */
+export class FactStore {
+  private facts: CreativeFact[] = [];
+
+  /** Record a new fact */
+  record(fact: Omit<CreativeFact, 'id' | 'recordedAt' | 'active'>): CreativeFact {
+    const full: CreativeFact = {
+      ...fact,
+      id: `fact-${Date.now().toString(36)}`,
+      recordedAt: new Date().toISOString(),
+      active: true,
+    };
+    this.facts.push(full);
+    return full;
+  }
+
+  /** Get all facts for a category */
+  getByCategory(category: CreativeFact['category']): CreativeFact[] {
+    return this.facts.filter((f) => f.active && f.category === category);
+  }
+
+  /** Get facts established in or before a section */
+  getUpToSection(sectionId: string): CreativeFact[] {
+    const idx = this.facts.findIndex((f) => f.sectionId === sectionId);
+    if (idx < 0) return this.facts.filter((f) => f.active);
+    return this.facts.slice(0, idx + 1).filter((f) => f.active);
+  }
+
+  /** Get recent facts (last N) */
+  getRecent(count = 10): CreativeFact[] {
+    return this.facts.filter((f) => f.active).slice(-count);
+  }
+
+  /** Retcon a fact (mark as inactive) */
+  retcon(factId: string, reason: string): void {
+    const fact = this.facts.find((f) => f.id === factId);
+    if (fact) {
+      fact.active = false;
+      this.record({
+        fact: `[已废弃: ${reason}] ${fact.fact}`,
+        sectionId: fact.sectionId,
+        sectionTitle: fact.sectionTitle,
+        category: fact.category,
+      });
+    }
+  }
+
+  /** Build a condensed context string for injection into section generation */
+  buildContext(maxChars = 800): string {
+    const recentFacts = this.getRecent(15);
+    if (recentFacts.length === 0) return '';
+
+    const byCategory: Record<string, string[]> = {};
+    for (const f of recentFacts) {
+      if (!byCategory[f.category]) byCategory[f.category] = [];
+      byCategory[f.category].push(`- ${f.fact} (§${f.sectionTitle})`);
+    }
+
+    let context = '## 已建立的事实（写作时请保持一致性）\n';
+    for (const [cat, facts] of Object.entries(byCategory)) {
+      context += `### ${cat}\n${facts.join('\n')}\n`;
+    }
+    return context.slice(0, maxChars);
+  }
+
+  /** Count active facts */
+  get count(): number {
+    return this.facts.filter((f) => f.active).length;
+  }
+
+  reset(): void {
+    this.facts = [];
+  }
+}
+
+/** Global singleton */
+export const factStore = new FactStore();
+
 /**
  * Create fresh creative memory.
  */

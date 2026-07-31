@@ -1,5 +1,5 @@
 import { LLMClient } from '@/lib/llm-client';
-import { buildWritingContext } from '@/runtime/creative-memory';
+import { buildWritingContext, factStore } from '@/runtime/creative-memory';
 import { getBeliefContext } from '@/runtime/belief-revision';
 import type { BeliefState } from '@/runtime/belief-revision';
 import type { CreativeMemory } from '@/runtime/creative-memory';
@@ -308,6 +308,36 @@ export class WritingAgent {
         draft.versions[draft.activeVersionIndex]?.content;
       this.state.outline[this.state.currentSectionIndex].status = 'done';
     }
+    // After saving content, auto-extract facts for cross-section reference
+    if (draft && draft.versions[draft.activeVersionIndex]) {
+      const content = draft.versions[draft.activeVersionIndex].content;
+      // Simple extraction: names, numbers, dates mentioned
+      const names = content.match(
+        /(?:张三|李四|王五|[A-Z][a-z]+|[^\s]{2,4}(?:老师|教授|先生|女士))/g,
+      );
+      if (names) {
+        for (const name of Array.from(new Set(names)).slice(0, 3)) {
+          factStore.record({
+            fact: `人物: ${name} 在本节出现`,
+            sectionId: String(this.state.currentSectionIndex),
+            sectionTitle: this.state.outline[this.state.currentSectionIndex].title,
+            category: 'character',
+          });
+        }
+      }
+      // Date/number facts
+      const dates = content.match(/\d{4}年|\d+万|\d+%/g);
+      if (dates) {
+        for (const d of Array.from(new Set(dates)).slice(0, 2)) {
+          factStore.record({
+            fact: `数据: ${d} 在本节中提及`,
+            sectionId: String(this.state.currentSectionIndex),
+            sectionTitle: this.state.outline[this.state.currentSectionIndex].title,
+            category: 'data',
+          });
+        }
+      }
+    }
     this.state.generationMetrics.sectionsGenerated++;
     this.state.currentSectionIndex++;
     if (this.state.currentSectionIndex >= this.state.totalSections) {
@@ -393,7 +423,7 @@ export class WritingAgent {
   // === Helpers ===
   private async assembleContext(idx: number): Promise<AssembledContext> {
     const s = this.state.outline[idx];
-    return {
+    const ctx: AssembledContext = {
       sectionAnchor: { title: s.title, goal: s.goal },
       transitions: {
         fromPrevious: idx > 0 ? this.state.outline[idx - 1].content?.slice(-200) || null : null,
@@ -405,6 +435,12 @@ export class WritingAgent {
       previousSections: '',
       difficultyHint: null,
     };
+    // Retrieve cross-section facts for consistency
+    const factContext = factStore.buildContext(600);
+    if (factContext) {
+      ctx.creativeDNA += '\n\n' + factContext;
+    }
+    return ctx;
   }
   private async showDraft(): Promise<string> {
     const d = this.state.sectionDrafts.get(this.state.currentSectionIndex);
