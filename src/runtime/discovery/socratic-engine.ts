@@ -97,41 +97,60 @@ export async function generateSocraticPrompts(params: {
   return {
     prompts: [
       {
-        text: '如果反过来，你会怎么写？',
+        text: `关于"${params.userInput.slice(0, 30)}"，如果换个完全相反的角度，你会怎么想？`,
         pattern: 'counter_question',
         rationale: '探索反向视角',
         expectedInsight: '发现被忽略的方向',
       },
       {
-        text: '这个想法最打动你的是什么？',
+        text: `这个想法最让你有表达欲的是什么？`,
         pattern: 'deepen_inquiry',
         rationale: '挖掘情感核心',
         expectedInsight: '找到真正重要的主题',
       },
       {
-        text: '如果没有限制，你理想中的版本是什么样的？',
+        text: `如果不考虑任何限制，你理想中的这篇文章应该是什么样的？`,
         pattern: 'constraint_challenge',
         rationale: '释放想象力',
         expectedInsight: '发现隐藏的愿景',
       },
     ],
-    analysis: '用户正在探索创作方向',
+    analysis: `用户正在探索"${params.userInput.slice(0, 40)}"的创作方向`,
     unexploredTerritory: ['情感核心', '反向视角', '理想版本'],
   };
 }
 
 /**
  * Quick helper: should we trigger Socratic mode?
- * Trigger when: user seems vague, stuck, or has had few interactions.
+ *
+ * NEVER trigger on first interaction — let the consensus engine
+ * establish understanding first. Only trigger when:
+ * - User explicitly says they're stuck/vague (after at least 1 round)
+ * - OR after 3+ interactions with low confidence
  */
 export function shouldTriggerSocratic(
   userInput: string,
   interactionCount: number,
   confidence: number,
 ): boolean {
-  const vagueSignals = ['不知道', '不确定', '没想好', '随便', '都可以', '不太清楚', '没什么想法'];
+  // NEVER on first interaction — let discovery establish understanding
+  if (interactionCount <= 1) return false;
+
+  // User explicitly signals being stuck
+  const vagueSignals = [
+    '不知道',
+    '不确定',
+    '没想好',
+    '随便',
+    '都可以',
+    '不太清楚',
+    '没什么想法',
+    '没有灵感',
+  ];
   const isVague = vagueSignals.some((s) => userInput.includes(s));
-  const isEarly = interactionCount <= 2;
-  const isLowConfidence = confidence < 0.5;
-  return isVague || isEarly || isLowConfidence;
+
+  // After several interactions with low confidence
+  const isStuckAfterMultiple = interactionCount >= 4 && confidence < 0.5;
+
+  return isVague || isStuckAfterMultiple;
 }

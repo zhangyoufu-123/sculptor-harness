@@ -156,6 +156,10 @@ export class SculptorOrchestrator {
   // =========================================================================
 
   private async handleDiscovery(input: string): Promise<string> {
+    // Increment interaction count so Socratic trigger and readiness
+    // checks have an accurate round number
+    this.state.belief.roundCount++;
+
     // Step 1: Extract creative assets (metaphors, decisions)
     extractCreativeAssets(input, this.state.creativeMemory);
 
