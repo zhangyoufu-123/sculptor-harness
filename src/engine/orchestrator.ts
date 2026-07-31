@@ -9,9 +9,10 @@
  */
 
 import { LLMClient } from '@/lib/llm-client';
+import { WritingAgent } from '@/agent/writing-agent';
 import { createBeliefState, getBeliefContext, type BeliefState } from '@/runtime/belief-revision';
 import { planStructure } from '@/skills/structure-planning';
-import { generateContent } from '@/skills/content-generation';
+
 import {
   generateHypotheses,
   type CreativeHypothesis,
@@ -67,6 +68,7 @@ export interface SessionState {
 
 export class SculptorOrchestrator {
   private state: SessionState;
+  private writingAgent: WritingAgent | null = null;
 
   constructor(initialIdea: string) {
     this.state = {
@@ -333,6 +335,7 @@ ${this.state.memories
     ) {
       this.state.phase = 'writing';
       this.state.currentSection = 0;
+      this.writingAgent = null;
       const section = this.state.outline[0];
       return `开始写作！第一节: **${section.title}** — ${section.goal}\n\n输入 /gen 让AI生成内容，或直接输入你的文字。`;
     }
@@ -358,50 +361,21 @@ ${this.state.memories
   // =========================================================================
 
   async handleWriting(input: string): Promise<string> {
-    if (input === '/gen') {
-      const section = this.state.outline[this.state.currentSection];
-      const prevContent =
-        this.state.currentSection > 0
-          ? this.state.outline[this.state.currentSection - 1].content?.slice(-100)
-          : undefined;
-      const nextTitle =
-        this.state.currentSection < this.state.outline.length - 1
-          ? this.state.outline[this.state.currentSection + 1].title
-          : undefined;
-
-      const result = await generateContent({
-        sectionTitle: section.title,
-        sectionGoal: section.goal,
-        artifactType: this.state.belief.artifact.value,
-        topic: this.state.belief.topic.value,
-        audience: this.state.belief.audience.value,
-        tone: this.state.belief.tone.value,
-        previousContent: prevContent,
-        nextSectionTitle: nextTitle,
-        creativeContext: buildWritingContext(this.state.creativeMemory),
+    if (!this.writingAgent) {
+      this.writingAgent = new WritingAgent({
+        belief: this.state.belief,
+        outline: this.state.outline.map((s) => ({ title: s.title, goal: s.goal })),
+        creativeMemory: this.state.creativeMemory,
       });
-
-      section.content = result.content;
-      return `✍️ **${section.title}**\n\n${result.content}\n\n输入 /done 继续下一节，或直接编辑内容。`;
+      return `开始写作！共 ${this.state.outline.length} 节。\n第一节: **${this.state.outline[0].title}**\n\n输入 /gen 生成内容`;
     }
-
-    if (input === '/done') {
-      this.state.currentSection++;
-      if (this.state.currentSection >= this.state.outline.length) {
-        this.state.phase = 'done';
-        return (
-          '🎉 全部完成！以下是完整作品：\n\n' +
-          this.state.outline.map((s) => `## ${s.title}\n${s.content || ''}`).join('\n\n')
-        );
-      }
-      const next = this.state.outline[this.state.currentSection];
-      return `下一节: **${next.title}** — ${next.goal}\n\n输入 /gen 生成内容。`;
-    }
-
-    // User is editing — save as content
-    const section = this.state.outline[this.state.currentSection];
-    section.content = input;
-    return `✅ 已保存。继续输入 /done 或 /gen。`;
+    const result = await this.writingAgent.handle(input);
+    this.state.outline = this.state.outline.map((s, i) => ({
+      ...s,
+      content: this.writingAgent!.getOutline()[i]?.content || s.content,
+    }));
+    if (result.phase === 'done') this.state.phase = 'done';
+    return result.response;
   }
 
   /** Get current state for display */
