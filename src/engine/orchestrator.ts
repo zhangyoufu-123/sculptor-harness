@@ -110,6 +110,67 @@ export class SculptorOrchestrator {
 
     // Handle /outline command
     if (userInput.startsWith('/outline')) {
+      // Handle /outline regenerate — force regeneration
+      if (userInput.startsWith('/outline regenerate')) {
+        if (shouldUseHierarchical(this.state.belief.artifact.value)) {
+          const hierOutline = await generateHierarchicalOutline({
+            artifactType: this.state.belief.artifact.value,
+            topic: this.state.belief.topic.value,
+            purpose: this.state.belief.intent.value,
+            audience: this.state.belief.audience.value,
+            tone: this.state.belief.tone.value,
+            summary: getBeliefContext(this.state.belief),
+          });
+          this.state.outline = hierOutline.flatList.map((n) => ({
+            title: n.title,
+            goal: n.goal,
+          }));
+          this.state.phase = 'outline';
+          return (
+            displayHierarchicalOutline(hierOutline.root!) +
+            '\n\n这个结构可以吗？输入 "确认" 开始写作。'
+          );
+        }
+
+        const outlineResult = await planStructure({
+          artifactType: this.state.belief.artifact.value,
+          topic: this.state.belief.topic.value,
+          purpose: this.state.belief.intent.value,
+          audience: this.state.belief.audience.value,
+          tone: this.state.belief.tone.value,
+          summary: getBeliefContext(this.state.belief),
+        });
+        this.state.outline = outlineResult.sections;
+        this.state.phase = 'outline';
+        return (
+          outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
+          '\n\n输入 "确认" 开始写作，或告诉我需要调整的地方。'
+        );
+      }
+
+      // Show current outline if it exists, otherwise generate new
+      if (this.state.outline.length > 0) {
+        const sections =
+          this.state.incOutline.length > 0
+            ? this.state.incOutline
+            : this.state.outline.map((s) => ({
+                title: s.title,
+                goal: s.goal,
+                status: 'confirmed' as const,
+                addedAt: '',
+              }));
+
+        const status = sections
+          .map((s, i) => {
+            const icon = s.status === 'confirmed' ? '✅' : s.status === 'proposed' ? '💡' : '⬜';
+            return `  ${icon} ${i + 1}. ${s.title} — ${s.goal}`;
+          })
+          .join('\n');
+
+        return `📐 当前大纲 (${sections.length} 节):\n${status}\n\n输入 /outline regenerate 重新生成\n输入 /edit-section N <修改建议> 修改指定节`;
+      }
+
+      // No outline exists — generate new
       // Hierarchical outline for long-form works (novel, 长篇)
       if (shouldUseHierarchical(this.state.belief.artifact.value)) {
         const hierOutline = await generateHierarchicalOutline({
@@ -547,6 +608,51 @@ ${this.state.memories
   // =========================================================================
 
   private async handleOutline(input: string): Promise<string> {
+    // Section-specific edit: "/edit-section 2 目标不够具体"
+    if (input.startsWith('/edit-section')) {
+      const parts = input.replace('/edit-section', '').trim().split(/\s+/);
+      const sectionNum = parseInt(parts[0]);
+      const suggestion = parts.slice(1).join(' ');
+
+      if (isNaN(sectionNum) || sectionNum < 1 || sectionNum > this.state.outline.length) {
+        return `无效的节号。当前共 ${this.state.outline.length} 节，请选择 1-${this.state.outline.length}`;
+      }
+
+      const idx = sectionNum - 1;
+      const section = this.state.outline[idx];
+
+      // Use LLM to understand and apply the edit
+      const response = await getLLM().completeWithRetry({
+        systemPrompt:
+          '你是大纲编辑助手。根据用户建议修改指定章节的标题或目标。输出JSON: {"title": "新标题", "goal": "新目标"}',
+        prompt: `当前章节: 标题="${section.title}", 目标="${section.goal}"\n修改建议: ${suggestion}\n请根据建议修改。如果只改目标，保持原标题。如果只改标题，保持原目标。`,
+        responseFormat: 'json',
+        temperature: 0.3,
+        maxTokens: 300,
+      });
+
+      if (response.json) {
+        const edit = response.json as { title?: string; goal?: string };
+        if (edit.title) section.title = edit.title;
+        if (edit.goal) section.goal = edit.goal;
+        return `✅ 第${sectionNum}节已更新:\n  标题: ${section.title}\n  目标: ${section.goal}`;
+      }
+
+      // Fallback: apply suggestion directly to goal
+      section.goal = suggestion;
+      return `✅ 第${sectionNum}节目标已更新为: ${suggestion}`;
+    }
+
+    // Natural language section edit: "把第2节改成XXX"
+    const naturalEditMatch = input.match(
+      /第?\s*(\d+)\s*[节章]\s*(?:改成|改为|修改|调整|换成)\s*(.+)/,
+    );
+    if (naturalEditMatch) {
+      const sectionNum = parseInt(naturalEditMatch[1]);
+      const suggestion = naturalEditMatch[2].trim();
+      return await this.handleSectionEdit(sectionNum, suggestion, true);
+    }
+
     if (
       input.includes('不行') ||
       input.includes('不对') ||
@@ -609,6 +715,41 @@ ${this.state.memories
       result.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
       '\n\n调整后的结构。确认开始写作？'
     );
+  }
+
+  // =========================================================================
+  // Section Edit Helper
+  // =========================================================================
+
+  private async handleSectionEdit(
+    sectionNum: number,
+    suggestion: string,
+    allowTitleChange: boolean,
+  ): Promise<string> {
+    if (sectionNum < 1 || sectionNum > this.state.outline.length) {
+      return `无效。共 ${this.state.outline.length} 节，选 1-${this.state.outline.length}`;
+    }
+    const idx = sectionNum - 1;
+    const section = this.state.outline[idx];
+
+    const response = await getLLM().completeWithRetry({
+      systemPrompt:
+        '你是大纲编辑助手。根据用户建议修改指定章节。输出JSON: {"title":"新标题","goal":"新目标"}',
+      prompt: `当前: 标题="${section.title}", 目标="${section.goal}"\n建议: ${suggestion}\n修改并输出JSON。`,
+      responseFormat: 'json',
+      temperature: 0.3,
+      maxTokens: 300,
+    });
+
+    if (response.json) {
+      const edit = response.json as { title?: string; goal?: string };
+      if (edit.title && allowTitleChange) section.title = edit.title;
+      if (edit.goal) section.goal = edit.goal;
+    } else {
+      section.goal = suggestion;
+    }
+
+    return `✅ 第${sectionNum}节: ${section.title} — ${section.goal}`;
   }
 
   // =========================================================================
