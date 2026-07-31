@@ -3,6 +3,20 @@ import { buildWritingContext, factStore } from '@/runtime/creative-memory';
 import { getBeliefContext } from '@/runtime/belief-revision';
 import type { BeliefState } from '@/runtime/belief-revision';
 import type { CreativeMemory } from '@/runtime/creative-memory';
+import { normalizeUncertainties } from '@/runtime/parse-output';
+import {
+  createPhaseGate,
+  recordMaterial,
+  getPhaseDisplay,
+  canAct,
+  type PhaseGateState,
+} from './phase-gate';
+import {
+  createMaterialChecklist,
+  extractMaterial,
+  getMaterialProgress,
+  type MaterialChecklist,
+} from '@/runtime/material-checklist';
 import type {
   WritingAgentState,
   OutlineSection,
@@ -21,6 +35,8 @@ export class WritingAgent {
   private llm: LLMClient;
   private discoveryContext: string;
   private discoverySummary: string;
+  private phaseGate: PhaseGateState;
+  private materialChecklist: MaterialChecklist;
 
   constructor(config: {
     belief: BeliefState;
@@ -62,12 +78,19 @@ export class WritingAgent {
       readerSimulationReport: null,
       generationMetrics: metrics,
     };
+    this.phaseGate = createPhaseGate(3);
+    this.materialChecklist = createMaterialChecklist(config.belief.artifact.value || '散文');
   }
 
   async handle(
     userInput: string,
   ): Promise<{ response: string; phase: 'writing' | 'done'; outlineChanged: boolean }> {
     const input = userInput.trim();
+    // Extract material from user input (for non-command inputs)
+    if (!input.startsWith('/') && input.length > 10) {
+      extractMaterial(this.materialChecklist, input);
+      recordMaterial(this.phaseGate, input);
+    }
     if (this.detectOutlineChange(input)) {
       this.state.generationMetrics.outlineChanges++;
       return {
@@ -78,12 +101,22 @@ export class WritingAgent {
     }
     switch (this.state.state) {
       case 'WRITING_IDLE':
-        if (input === '/gen')
+        // Phase gate: don't allow generation in COLLECTING
+        if (input === '/gen') {
+          const blockReason = canAct(this.phaseGate, 'generate');
+          if (blockReason) {
+            return {
+              response: `🔒 ${blockReason}\n${getPhaseDisplay(this.phaseGate)}\n${getMaterialProgress(this.materialChecklist)}`,
+              phase: 'writing',
+              outlineChanged: false,
+            };
+          }
           return {
             response: await this.startGeneration(),
             phase: 'writing',
             outlineChanged: false,
           };
+        }
         if (input === '/outline') {
           return {
             response:
@@ -268,12 +301,14 @@ export class WritingAgent {
       draft.versions.push(version);
       draft.activeVersionIndex = draft.versions.length - 1;
       this.state.currentDraft = draft;
-      if (uncertainties.length > 0) {
+      // Use normalized uncertainties for display
+      const safeUncertainties = normalizeUncertainties(uncertainties);
+      if (safeUncertainties.length > 0) {
         draft.uncertainties = uncertainties.slice(0, 2);
         draft.clarificationState = 'asked';
         this.state.state = 'AWAITING_CLARIFICATION';
         this.state.generationMetrics.clarificationsAsked++;
-        return `✍️ ${this.progress()} ${section.title}\n\n${content}\n\n💭 需要确认:\n${uncertainties
+        return `✍️ ${this.progress()} ${section.title}\n\n${content}\n\n💭 需要确认:\n${safeUncertainties
           .slice(0, 2)
           .map(
             (u, i) =>
@@ -467,10 +502,13 @@ export class WritingAgent {
         .map((s) => `## ${s.title}\n${s.content || '(空)'}`)
         .join('\n\n');
       const metrics = this.state.generationMetrics;
+      // Show material progress in completion message
+      const materialProgress = getMaterialProgress(this.materialChecklist);
       return {
         response: [
           `🎉 全部完成！共 ${this.state.totalSections} 节`,
           `📊 统计: ${metrics.sectionsGenerated}节生成 | ${metrics.conversationalRevisions}次修改`,
+          materialProgress,
           '',
           fullText,
           '',
