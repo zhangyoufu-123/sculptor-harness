@@ -793,7 +793,19 @@ ${this.state.memories
         conversationContext: handoffContext,
         discoverySummary: handoffSummary,
       });
-      return `开始写作！共 ${this.state.outline.length} 节。\n第一节: **${this.state.outline[0].title}**\n\n输入 /gen 生成内容`;
+      // Don't return early — pass the input through to the WritingAgent
+      // so material collection can begin immediately.
+      const result = await this.writingAgent.handle(input);
+      this.state.outline = this.state.outline.map((s, i) => ({
+        ...s,
+        content: this.writingAgent!.getOutline()[i]?.content || s.content,
+      }));
+      if (result.phase === 'done') this.state.phase = 'done';
+      return (
+        `开始写作！共 ${this.state.outline.length} 节。\n` +
+        `第一节: **${this.state.outline[0].title}**\n\n` +
+        result.response
+      );
     }
     const result = await this.writingAgent.handle(input);
     this.state.outline = this.state.outline.map((s, i) => ({
