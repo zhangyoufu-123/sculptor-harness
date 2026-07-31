@@ -84,8 +84,27 @@ export class WritingAgent {
             phase: 'writing',
             outlineChanged: false,
           };
+        if (input === '/outline') {
+          return {
+            response:
+              `📐 ${this.progress()}\n` +
+              this.state.outline
+                .map((s, i) => {
+                  const status = s.status === 'done' ? '✅' : '  ';
+                  return `  ${status} ${i + 1}. ${s.title} — ${s.goal}`;
+                })
+                .join('\n'),
+            phase: 'writing',
+            outlineChanged: false,
+          };
+        }
         return {
-          response: `输入 /gen 生成第${this.state.currentSectionIndex + 1}节`,
+          response: [
+            `📝 ${this.progress()} ${this.state.currentSectionIndex + 1}. **${this.state.outline[this.state.currentSectionIndex].title}**`,
+            `   ${this.state.outline[this.state.currentSectionIndex].goal}`,
+            '',
+            '/gen 生成  |  /outline 查看  |  直接输入文字',
+          ].join('\n'),
           phase: 'writing',
           outlineChanged: false,
         };
@@ -127,10 +146,33 @@ export class WritingAgent {
             phase: 'writing',
             outlineChanged: false,
           };
-        if (input === '/done')
-          return { response: '🎉 创作完成！', phase: 'done', outlineChanged: false };
+        if (input === '/done') {
+          const fullText = this.state.outline
+            .map((s) => `## ${s.title}\n${s.content || ''}`)
+            .join('\n\n');
+          const wordCount = fullText.replace(/\s/g, '').length;
+          return {
+            response: [
+              `🎉 创作完成！`,
+              `📊 ${this.state.totalSections}节 · ${wordCount}字 · ${this.state.generationMetrics.totalRevisions}次修改`,
+              '',
+              fullText,
+              '',
+              '内容已显示在上方。感谢使用 Sculptor！',
+            ].join('\n'),
+            phase: 'done',
+            outlineChanged: false,
+          };
+        }
         return {
-          response: '全部完成。输入 /polish 读者模拟 或 /done 结束',
+          response: [
+            `🎉 全部 ${this.state.totalSections} 节完成！`,
+            '',
+            `📊 统计: ${this.state.generationMetrics.sectionsGenerated}节生成 · ${this.state.generationMetrics.conversationalRevisions}次修改`,
+            '',
+            '建议输入 /polish 让模拟读者帮你打磨',
+            '或 /done 直接完成',
+          ].join('\n'),
           phase: 'writing',
           outlineChanged: false,
         };
@@ -231,7 +273,7 @@ export class WritingAgent {
         draft.clarificationState = 'asked';
         this.state.state = 'AWAITING_CLARIFICATION';
         this.state.generationMetrics.clarificationsAsked++;
-        return `✍️ ${section.title}\n\n${content}\n\n💭 需要确认:\n${uncertainties
+        return `✍️ ${this.progress()} ${section.title}\n\n${content}\n\n💭 需要确认:\n${uncertainties
           .slice(0, 2)
           .map(
             (u, i) =>
@@ -240,10 +282,54 @@ export class WritingAgent {
           .join('\n')}\n\n回答或 /accept`;
       }
       this.state.state = 'PRESENTING';
-      return `✍️ ${section.title}\n\n${content}\n\n/accept 确认 /edit <修改> /retry`;
+      return `✍️ ${this.progress()} ${section.title}\n\n${content}\n\n/accept 确认 /edit <修改> /retry`;
     } catch {
-      this.state.state = 'WRITING_IDLE';
-      return '生成失败，/retry 重试';
+      // Auto-retry once with simpler prompt
+      try {
+        const resp2 = await this.llm.completeWithRetry({
+          systemPrompt: '生成指定章节内容。',
+          prompt: `标题: ${section.title}\n目标: ${section.goal}\n请生成内容。`,
+          temperature: 0.7,
+          maxTokens: 1500,
+        });
+        const content = resp2.text || this.fallbackContent(section);
+        const version: SectionVersion = {
+          id: `v${Date.now().toString(36)}`,
+          content,
+          notes: '(简化生成)',
+          assumptions: [],
+          uncertainties: [],
+          confidenceScores: this.defaultConfidence(),
+          createdAt: new Date().toISOString(),
+          parentId: null,
+          revisionTrigger: null,
+        };
+        let draft = this.state.sectionDrafts.get(idx);
+        if (!draft) {
+          draft = {
+            sectionIndex: idx,
+            title: section.title,
+            goal: section.goal,
+            versions: [],
+            activeVersionIndex: -1,
+            acceptedVersionIndex: null,
+            uncertainties: [],
+            clarificationState: 'none',
+            transitions: { fromPrevious: null, toNext: null },
+            generatedAt: null,
+            acceptedAt: null,
+          };
+          this.state.sectionDrafts.set(idx, draft);
+        }
+        draft.versions.push(version);
+        draft.activeVersionIndex = draft.versions.length - 1;
+        this.state.currentDraft = draft;
+        this.state.state = 'PRESENTING';
+        return `✍️ ${this.progress()} ${section.title}\n\n${content}\n\n/accept 确认 /edit <修改> /retry`;
+      } catch {
+        this.state.state = 'WRITING_IDLE';
+        return `❌ 生成失败。请稍后重试 /gen`;
+      }
     }
   }
 
@@ -377,15 +463,29 @@ export class WritingAgent {
     this.state.currentSectionIndex++;
     if (this.state.currentSectionIndex >= this.state.totalSections) {
       this.state.state = 'ALL_COMPLETE';
+      const fullText = this.state.outline
+        .map((s) => `## ${s.title}\n${s.content || '(空)'}`)
+        .join('\n\n');
+      const metrics = this.state.generationMetrics;
       return {
-        response: `🎉 全部完成！共${this.state.totalSections}节\n输入 /polish 读者模拟 或 /done`,
+        response: [
+          `🎉 全部完成！共 ${this.state.totalSections} 节`,
+          `📊 统计: ${metrics.sectionsGenerated}节生成 | ${metrics.conversationalRevisions}次修改`,
+          '',
+          fullText,
+          '',
+          '输入 /polish 读者模拟打磨 或 /done 结束',
+        ].join('\n'),
         phase: 'writing',
         outlineChanged: false,
       };
     }
+    // AUTO-ADVANCE: show next section and prompt /gen
     this.state.state = 'WRITING_IDLE';
+    const next = this.state.outline[this.state.currentSectionIndex];
+    const progress = `[${this.state.currentSectionIndex + 1}/${this.state.totalSections}]`;
     return {
-      response: `✅ 完成。第${this.state.currentSectionIndex + 1}节: ${this.state.outline[this.state.currentSectionIndex].title}\n输入 /gen`,
+      response: `✅ 第${this.state.currentSectionIndex}节完成。${progress}\n\n下一节: **${next.title}** — ${next.goal}\n\n输入 /gen 生成内容，或直接输入文字`,
       phase: 'writing',
       outlineChanged: false,
     };
@@ -494,7 +594,9 @@ export class WritingAgent {
   }
   private async showDraft(): Promise<string> {
     const d = this.state.sectionDrafts.get(this.state.currentSectionIndex);
-    return d?.versions[d.activeVersionIndex]?.content || '无内容';
+    const content = d?.versions[d.activeVersionIndex]?.content || '无内容';
+    const section = this.state.outline[this.state.currentSectionIndex];
+    return `✍️ ${this.progress()} ${section.title}\n\n${content}`;
   }
   private defaultConfidence(): ConfidenceScores {
     return {
@@ -509,6 +611,11 @@ export class WritingAgent {
   }
   private fallbackContent(s: OutlineSection): string {
     return `关于「${s.title}」——${s.goal}`;
+  }
+  /** Build progress indicator string */
+  private progress(): string {
+    const done = this.state.outline.filter((s) => s.status === 'done').length;
+    return `[${done}/${this.state.totalSections}]`;
   }
   getOutline(): OutlineSection[] {
     return this.state.outline;
