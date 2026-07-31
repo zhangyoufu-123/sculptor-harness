@@ -10,7 +10,12 @@
 
 import { LLMClient } from '@/lib/llm-client';
 import { WritingAgent } from '@/agent/writing-agent';
-import { createBeliefState, getBeliefContext, type BeliefState } from '@/runtime/belief-revision';
+import {
+  createBeliefState,
+  getBeliefContext,
+  reviseBelief,
+  type BeliefState,
+} from '@/runtime/belief-revision';
 import { planStructure } from '@/skills/structure-planning';
 
 import {
@@ -188,6 +193,15 @@ export class SculptorOrchestrator {
         this.state.belief.artifact.evidence.push(signal.detected);
       }
 
+      // Update belief state with what we learned from consensus reflection
+      reviseBelief(
+        this.state.belief,
+        {
+          topic: this.state.belief.topic.value || input,
+        },
+        `共识反映: ${input.slice(0, 80)}`,
+      );
+
       return consensus.reflection;
     }
 
@@ -196,9 +210,75 @@ export class SculptorOrchestrator {
 
     // If user is goal-oriented and we have enough understanding, suggest outline
     if (intent.mode === 'goal_oriented' && this.state.belief.overallConfidence > 0.5) {
+      reviseBelief(
+        this.state.belief,
+        {
+          topic: this.state.belief.topic.value || input,
+        },
+        `用户说: ${input.slice(0, 80)}`,
+      );
+
       const readyMsg = `方向已经很清晰了！${intent.reasoning}。\n输入 /outline 生成大纲，或继续讨论。`;
       this.state.messages.push({ role: 'assistant', content: readyMsg });
       return readyMsg;
+    }
+
+    // UPDATE BELIEF STATE with user input — critical fix
+    // Without this, the system never learns from user answers
+    reviseBelief(
+      this.state.belief,
+      {
+        topic: this.state.belief.topic.value || input,
+      },
+      `用户说: ${input.slice(0, 80)}`,
+    );
+
+    // Extract artifact type from user input if explicitly stated
+    const explicitTypes: Record<string, string> = {
+      散文: '散文',
+      小说: '小说',
+      论文: '学术论文',
+      诗: '诗歌',
+      教程: '教程',
+      博客: '博客',
+      公众号: '博客',
+      报告: '研究报告',
+      演讲稿: '演讲稿',
+      剧本: '剧本',
+    };
+    for (const [keyword, type] of Object.entries(explicitTypes)) {
+      if (input.includes(keyword)) {
+        reviseBelief(this.state.belief, { artifact: type }, `用户明确提到"${keyword}"`);
+        break;
+      }
+    }
+
+    // Extract audience if explicitly stated
+    if (input.includes('莘莘学子') || input.includes('学生')) {
+      reviseBelief(this.state.belief, { audience: '学生' }, `用户提到受众`);
+    }
+
+    // Skip clarification if we already know enough
+    if (
+      this.state.belief.overallConfidence > 0.6 &&
+      this.state.belief.artifact.confidence > 0.7 &&
+      this.state.belief.roundCount >= 3
+    ) {
+      // Generate outline directly — we have enough information
+      const outlineResult = await planStructure({
+        artifactType: this.state.belief.artifact.value,
+        topic: this.state.belief.topic.value,
+        purpose: this.state.belief.intent.value,
+        audience: this.state.belief.audience.value,
+        tone: this.state.belief.tone.value,
+        summary: getBeliefContext(this.state.belief),
+      });
+      this.state.outline = outlineResult.sections;
+      this.state.phase = 'outline';
+      return (
+        outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
+        '\n\n输入 "确认" 开始写作。'
+      );
     }
 
     // Smart clarification: use the JSON clarifier pattern from NVIDIA aiq
@@ -301,7 +381,14 @@ export class SculptorOrchestrator {
     this.state.incOutline = incResult.sections;
 
     // Step 5: If ready for outline, generate it
-    if (readiness.canOutline) {
+    // Only use the readiness fallback when belief-confidence skip did NOT trigger.
+    // If belief is already mature (>0.6 overall, >0.7 artifact, >=3 rounds),
+    // the skip above would have already generated the outline and returned.
+    const beliefAlreadyHandled =
+      this.state.belief.overallConfidence > 0.6 &&
+      this.state.belief.artifact.confidence > 0.7 &&
+      this.state.belief.roundCount >= 3;
+    if (readiness.canOutline && !beliefAlreadyHandled) {
       // Hierarchical outline for long-form works (novel, 长篇)
       if (shouldUseHierarchical(this.state.belief.artifact.value)) {
         const hierOutline = await generateHierarchicalOutline({

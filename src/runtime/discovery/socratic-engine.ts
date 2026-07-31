@@ -270,6 +270,39 @@ export async function decideClarification(
     };
   }
 
+  // Check if key information is already known from belief state
+  if (
+    currentUnderstanding.includes('散文') ||
+    currentUnderstanding.includes('小说') ||
+    currentUnderstanding.includes('论文') ||
+    currentUnderstanding.includes('诗歌')
+  ) {
+    // Artifact type is already known — don't ask about it
+    if (currentUnderstanding.includes('100%') && interactionCount >= 3) {
+      return {
+        needsClarification: false,
+        question: '',
+        reasoning: '核心信息已充分收集',
+        addresses: '',
+      };
+    }
+  }
+
+  // If belief confidence is already high (>70%), skip clarification
+  if (
+    currentUnderstanding.includes('70%') ||
+    currentUnderstanding.includes('80%') ||
+    currentUnderstanding.includes('90%') ||
+    currentUnderstanding.includes('95%')
+  ) {
+    return {
+      needsClarification: false,
+      question: '',
+      reasoning: '理解置信度已足够',
+      addresses: '',
+    };
+  }
+
   const prompt = `当前理解: ${currentUnderstanding}
 用户最新输入: "${userInput}"
 交互轮次: ${interactionCount}
