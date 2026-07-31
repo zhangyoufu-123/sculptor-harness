@@ -152,7 +152,7 @@ export class WritingAgent {
   }
 
   // === Generation ===
-  private async startGeneration(): Promise<string> {
+  private async startGeneration(retry?: boolean): Promise<string> {
     this.state.state = 'GENERATING';
     const idx = this.state.currentSectionIndex;
     const section = this.state.outline[idx];
@@ -179,6 +179,14 @@ export class WritingAgent {
       const r = (resp.json || {}) as Record<string, unknown>;
       const content = (r.content as string) || this.fallbackContent(section);
       const uncertainties = (r.uncertainties as WritingUncertainty[]) || [];
+
+      // Quality gate: content must be meaningful
+      if (!content || content.length < 20) {
+        if (retry) return `生成失败。请检查网络连接后 /retry 重试。`;
+        // Auto-retry once
+        return await this.startGeneration(true);
+      }
+
       const version: SectionVersion = {
         id: `v${Date.now().toString(36)}`,
         content,
@@ -233,16 +241,28 @@ export class WritingAgent {
 
   private async handleClarificationAnswer(input: string): Promise<string> {
     const draft = this.state.sectionDrafts.get(this.state.currentSectionIndex);
-    if (draft) {
-      draft.uncertainties.forEach((u) => {
-        u.userAnswer = input;
-        u.resolved = true;
-        u.answeredAt = new Date().toISOString();
-      });
-      draft.clarificationState = 'answered';
+    if (!draft) return '无草稿。';
+
+    // Only answer the FIRST unresolved uncertainty
+    const unresolved = draft.uncertainties.find((u) => !u.resolved);
+    if (unresolved) {
+      unresolved.userAnswer = input;
+      unresolved.resolved = true;
+      unresolved.answeredAt = new Date().toISOString();
     }
-    this.state.generationMetrics.clarificationsAnswered++;
-    return await this.startGeneration();
+
+    // If all resolved, regenerate
+    const allResolved = draft.uncertainties.every((u) => u.resolved);
+    if (allResolved) {
+      draft.clarificationState = 'answered';
+      this.state.generationMetrics.clarificationsAnswered++;
+      return await this.startGeneration();
+    }
+
+    // Still have unresolved — ask next
+    const next = draft.uncertainties.find((u) => !u.resolved);
+    this.state.state = 'AWAITING_CLARIFICATION';
+    return `💭 下一个问题:\n${next!.question}\n   我的假设: ${next!.assumption}\n   默认: ${next!.suggestedAnswer}`;
   }
 
   // === Dual Editing ===
@@ -395,17 +415,26 @@ export class WritingAgent {
 
   private async applyFixes(input: string): Promise<string> {
     const ids = input.replace('/fix', '').trim().split(/\s+/);
+    const report = this.state.readerSimulationReport;
     for (const id of ids) {
       const idx = parseInt(id) - 1;
       if (idx >= 0 && idx < this.state.totalSections) {
         const content = this.state.outline[idx].content || '';
+        // Find friction points for this section
+        const frictionPoints = report?.frictionPoints?.filter((f) => f.sectionIndex === idx) || [];
+        const frictionContext = frictionPoints
+          .map((f) => `- ${f.issue}: ${f.suggestion}`)
+          .join('\n');
+
         const resp = await this.llm.completeWithRetry({
-          systemPrompt: '改进这段内容。',
-          prompt: `改进: ${content}`,
+          systemPrompt: '根据具体建议改进这段内容。只输出修改后的版本。',
+          prompt: `原文:\n${content}\n\n需要解决的问题:\n${frictionContext || '改进内容质量'}`,
           temperature: 0.5,
           maxTokens: 2000,
         });
-        if (resp.text && this.state.outline[idx]) this.state.outline[idx].content = resp.text;
+        if (resp.text && this.state.outline[idx]) {
+          this.state.outline[idx].content = resp.text;
+        }
       }
     }
     return '✅ 修复完成。/polish 重新模拟 /done';
