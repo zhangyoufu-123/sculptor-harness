@@ -344,90 +344,70 @@ export interface PerspectiveQuestion {
 }
 
 /**
- * Generate questions from different perspectives.
- * From STORM: discover perspectives, use each as a lens for questions.
- * V1: hardcoded writing perspectives. V2: LLM-generated from similar-content.
+ * Generate context-specific perspective questions using LLM.
+ * V2: replaces hardcoded templates with dynamic, topic-aware inspiration.
  */
-export function generatePerspectiveQuestions(
+export async function generatePerspectiveQuestions(
   topic: string,
   creativeType: string,
-): PerspectiveQuestion[] {
-  const perspectives: PerspectiveQuestion[] = [];
+  knownInfo: string,
+  avoidAsking: string[],
+): Promise<PerspectiveQuestion[]> {
+  // Build a prompt that generates RELEVANT, SPECIFIC questions
+  const prompt = `用户想创作关于"${topic}"的${creativeType}。
 
-  if (
-    creativeType.includes('论文') ||
-    creativeType.includes('学术') ||
-    creativeType.includes('research')
-  ) {
-    perspectives.push(
-      {
-        perspective: '定义边界',
-        question: `关于"${topic}"，你研究的核心问题是什么？范围有多大？`,
-        relevance: 0.9,
-      },
-      {
-        perspective: '文献对话',
-        question: `在这个话题上，已有的研究/观点中，你最不同意的是什么？`,
-        relevance: 0.85,
-      },
-      {
-        perspective: '方法论',
-        question: `你打算用什么方法来论证？案例分析？数据分析？文献综述？`,
-        relevance: 0.8,
-      },
-      {
-        perspective: '读者预期',
-        question: `这篇论文的目标读者是谁？他们为什么需要读这篇论文？`,
-        relevance: 0.75,
-      },
-    );
-  } else if (
-    creativeType.includes('小说') ||
-    creativeType.includes('故事') ||
-    creativeType.includes('novel')
-  ) {
-    perspectives.push(
-      {
-        perspective: '世界观',
-        question: `这个世界有什么独特规则？读者进入时最先感受到什么？`,
-        relevance: 0.9,
-      },
-      {
-        perspective: '人物驱动',
-        question: `主角内心最大的矛盾是什么？他/她最害怕失去什么？`,
-        relevance: 0.9,
-      },
-      {
-        perspective: '情感弧线',
-        question: `你希望读者在故事的哪个节点开始流泪（或大笑）？`,
-        relevance: 0.85,
-      },
-      {
-        perspective: '叙事结构',
-        question: `故事是按时间顺序展开，还是有倒叙/插叙？`,
-        relevance: 0.75,
-      },
-    );
-  } else {
-    perspectives.push(
-      {
-        perspective: '核心观点',
-        question: `如果只让读者记住一句话，你希望是哪句？`,
-        relevance: 0.9,
-      },
-      {
-        perspective: '读者共鸣',
-        question: `什么样的人读到这篇文章会感觉"这就是在写我"？`,
-        relevance: 0.85,
-      },
-      {
-        perspective: '独特角度',
-        question: `和同类话题的文章比，你的文章最不一样的地方是什么？`,
-        relevance: 0.8,
-      },
-      { perspective: '行动呼吁', question: `你希望读者读完文章后做什么？`, relevance: 0.75 },
-    );
+已收集的信息:
+${knownInfo || '(尚无)'}
+
+避免重复询问: ${avoidAsking.join(', ') || '无'}
+
+请生成3个能帮助用户拓宽思路的问题。规则:
+1. 每个问题必须与"${topic}"具体相关，不要泛泛而谈
+2. 不要重新问已经收集到的信息
+3. 每个问题从不同的角度切入
+4. 问题应该能激发灵感，让用户产生新的想法
+5. 每个问题配一个简短的"视角名"（2-4字）
+
+输出JSON:
+{
+  "questions": [
+    {"perspective": "视角名", "question": "具体问题", "relevance": 0.9}
+  ]
+}`;
+
+  try {
+    const llm = getLLM();
+    const response = await llm.completeWithRetry({
+      systemPrompt: '你是创作灵感激发助手。生成具体、有针对性的启发问题。',
+      prompt,
+      responseFormat: 'json',
+      temperature: 0.7,
+      maxTokens: 500,
+    });
+    if (response.json) {
+      const data = response.json as { questions: PerspectiveQuestion[] };
+      return (data.questions || []).slice(0, 3);
+    }
+  } catch {
+    /* fallback */
   }
 
-  return perspectives.sort((a, b) => b.relevance - a.relevance);
+  // Fallback: still generate context-aware, just simpler
+  return [
+    {
+      perspective: '具体化',
+      question: `关于"${topic.slice(0, 30)}"，有没有一个具体的时刻或场景让你想写这个？`,
+      relevance: 0.9,
+    },
+    {
+      perspective: '读者连接',
+      question: '读到这篇文章的人，你希望他们内心产生什么变化？',
+      relevance: 0.85,
+    },
+    {
+      perspective: '反向思考',
+      question: `如果从完全相反的角度看"${topic.slice(0, 20)}"，你会怎么写？`,
+      relevance: 0.8,
+    },
+  ];
 }

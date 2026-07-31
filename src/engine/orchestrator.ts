@@ -326,10 +326,13 @@ export class SculptorOrchestrator {
           });
 
           // Use perspective-guided questions as options
-          const perspectives = generatePerspectiveQuestions(
+          const perspectives = await generatePerspectiveQuestions(
             this.state.belief.topic.value,
             this.state.belief.artifact.value,
-          )
+            questionTracker.buildKnownSummary(),
+            questionTracker.buildAvoidList(),
+          );
+          const filteredPerspectives = perspectives
             .filter((p) => !questionTracker.hasBeenAsked(p.perspective))
             .slice(0, 3);
 
@@ -338,9 +341,11 @@ export class SculptorOrchestrator {
             '',
             `❓ ${clarification.question}`,
             '',
-            '📐 也可以从这些角度思考:',
-            ...perspectives.map((p) => `  • ${p.perspective}: ${p.question.slice(0, 50)}...`),
-          ].join('\n');
+            filteredPerspectives.length > 0 ? '📐 换个角度思考:' : '',
+            ...filteredPerspectives.map((p) => `  • ${p.perspective}: ${p.question}`),
+          ]
+            .filter(Boolean)
+            .join('\n');
 
           this.state.messages.push({ role: 'assistant', content: response });
           return response;
