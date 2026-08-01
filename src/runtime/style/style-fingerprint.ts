@@ -11,6 +11,8 @@
  * Style comes from LIMITATION, not ability.
  */
 
+import { LLMClient } from '@/lib/llm-client';
+
 // =========================================================================
 // Style Fingerprint — the core data model
 // =========================================================================
@@ -293,4 +295,90 @@ function classifyAssociationType(original: string, replacement: string): string 
   // Emotional → restrained
   if (original.includes('！') && !replacement.includes('！')) return '克制';
   return '改写';
+}
+
+// =========================================================================
+// X-Prompt: Auto Style Profiling via LLM
+// =========================================================================
+
+/**
+ * Auto-extract a style profile from user's writing samples using LLM.
+ * X-Prompt approach: generates a natural language style prefix for injection.
+ */
+export async function extractStyleProfile(samples: string[]): Promise<string> {
+  if (samples.length === 0) return '';
+
+  const llm = new LLMClient();
+
+  try {
+    const response = await llm.completeWithRetry({
+      systemPrompt: `你是写作风格分析专家。分析用户的写作样本，提取风格画像。输出JSON: {"tone":"语气","sentenceStyle":"句式特点","vocabulary":"词汇特征","patterns":["模式1","模式2"],"voice":["描述1","描述2"],"avoidList":["应避免的表达"]}`,
+      prompt: `分析以下写作样本的风格:\n${samples.map((s, i) => `样本${i + 1}: ${s.slice(0, 200)}`).join('\n')}\n\n以JSON格式输出风格画像。`,
+      responseFormat: 'json',
+      temperature: 0.3,
+      maxTokens: 500,
+    });
+
+    if (response.json) {
+      const profile = response.json as Record<string, unknown>;
+      const parts: string[] = ['## 自动提取的风格画像'];
+      if (profile.tone) parts.push(`语气: ${profile.tone}`);
+      if (profile.sentenceStyle) parts.push(`句式: ${profile.sentenceStyle}`);
+      if (profile.vocabulary) parts.push(`词汇: ${profile.vocabulary}`);
+      if (Array.isArray(profile.patterns))
+        parts.push(`模式: ${(profile.patterns as string[]).join(', ')}`);
+      if (Array.isArray(profile.voice))
+        parts.push(`声音: ${(profile.voice as string[]).join(', ')}`);
+      if (Array.isArray(profile.avoidList))
+        parts.push(`避免: ${(profile.avoidList as string[]).join(', ')}`);
+      return parts.join('\n');
+    }
+  } catch {
+    /* fallback */
+  }
+
+  return '';
+}
+
+// =========================================================================
+// Enhanced Contrastive Examples — "other author" wrong patterns
+// =========================================================================
+
+/**
+ * Generate enhanced contrastive examples including "other author" wrong patterns.
+ */
+export function buildEnhancedContrastiveExamples(fp: StyleFingerprint): string {
+  if (fp.confidence < 0.3 || fp.resistance.length === 0) return '';
+
+  const examples: string[] = [];
+  examples.push('\n## ⚠️ 风格对比（避免 → 偏好）');
+
+  // User's own preference patterns
+  for (const r of fp.resistance.slice(0, 2)) {
+    const replacement = fp.associations.find((a) => a.from.includes(r.pattern.slice(0, 15)));
+    examples.push(`\n### 你倾向于避免: ${r.category}`);
+    examples.push(`❌ 不要: "${r.pattern.slice(0, 50)}" (已拒绝${r.count}次)`);
+    if (replacement) {
+      examples.push(`✅ 你偏好: "${replacement.to.slice(0, 50)}"`);
+    }
+  }
+
+  // Generic "everyone does this" patterns that the user avoids
+  const universalClichés = {
+    generic: ['其他作者常写的通用表达（如"综上所述"、"不可否认"、"具有重要意义"）'],
+    overly_formal: ['其他作者常见的过度正式表达（如"在此基础之上"、"有鉴于此"）'],
+    overly_casual: ['其他作者常见的过度口语表达（如"咱们就是说"、"绝绝子"）'],
+  };
+
+  const userCategories = new Set(fp.resistance.map((r) => r.category));
+  for (const [cat, patterns] of Object.entries(universalClichés)) {
+    if (userCategories.has(cat)) {
+      examples.push(`\n### 其他人常写（但你要避免）: ${cat}`);
+      for (const p of patterns) {
+        examples.push(`⚠️ ${p}`);
+      }
+    }
+  }
+
+  return examples.join('\n');
 }

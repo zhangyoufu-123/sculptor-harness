@@ -340,22 +340,29 @@ ${critique.rewriteInstructions}
       if (avg.isGeneric) {
         version.notes += ` | ⚠️ 检测到${avg.phrases.length}个通用表达`;
       }
-      // Clarification Game: when confidence is low, proactively ask
+      // Clarification Game: risk-level-based questioning
       const scores = version.confidenceScores;
-      if (scores.overall < 0.6 || scores.factualAccuracy < 0.5 || scores.audienceFit < 0.5) {
-        const weakAspects: string[] = [];
-        if (scores.factualAccuracy < 0.5) weakAspects.push('事实准确性');
-        if (scores.audienceFit < 0.5) weakAspects.push('读者适配度');
-        if (scores.styleAdherence < 0.5) weakAspects.push('风格一致性');
+      const riskLevel = scores.overall < 0.4 ? 'high' : scores.overall < 0.6 ? 'medium' : 'low';
 
-        if (weakAspects.length > 0) {
-          const clarificationMsg = [
-            `\n💡 我对这段话的${weakAspects.join('、')}不太确定。`,
-            `你能帮我确认一下吗？`,
-            `直接告诉我需要怎么改，或者 /accept 保持现状。`,
+      if (riskLevel !== 'low') {
+        const weakAspects: string[] = [];
+        if (scores.factualAccuracy < 0.4) weakAspects.push('事实准确性');
+        if (scores.audienceFit < 0.4) weakAspects.push('读者适配度');
+        if (scores.styleAdherence < 0.4) weakAspects.push('风格一致性');
+        if (scores.creativeConstraint < 0.4) weakAspects.push('创作约束');
+
+        if (weakAspects.length > 0 || riskLevel === 'high') {
+          const riskLabel = riskLevel === 'high' ? '🔴 高风险' : '🟡 中等风险';
+          const msg = [
+            `\n${riskLabel} — 我对以下方面不太确定:`,
+            ...weakAspects.map((a) => `  • ${a}`),
+            '',
+            riskLevel === 'high'
+              ? '建议先确认这些细节再继续。直接回答或 /accept 接受当前版本。'
+              : '能帮我确认一下吗？或 /accept 保持现状。',
           ].join('\n');
 
-          return `✍️ ${this.progress()} ${section.title}\n\n${content}${clarificationMsg}`;
+          return `✍️ ${this.progress()} ${section.title}\n\n${content}${msg}`;
         }
       }
       // Use normalized uncertainties for display
