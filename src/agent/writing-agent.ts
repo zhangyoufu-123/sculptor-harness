@@ -7,7 +7,7 @@ import {
   createStyleFingerprint,
   recordResistance,
   recordAssociation,
-  getCompactStyleConstraints,
+  buildStyleConstraints,
   type StyleFingerprint,
 } from '@/runtime/style/style-fingerprint';
 import { critiqueStyle, detectAverageness } from '@/runtime/style/style-critic';
@@ -339,6 +339,24 @@ ${critique.rewriteInstructions}
       const avg = detectAverageness(version.content);
       if (avg.isGeneric) {
         version.notes += ` | ⚠️ 检测到${avg.phrases.length}个通用表达`;
+      }
+      // Clarification Game: when confidence is low, proactively ask
+      const scores = version.confidenceScores;
+      if (scores.overall < 0.6 || scores.factualAccuracy < 0.5 || scores.audienceFit < 0.5) {
+        const weakAspects: string[] = [];
+        if (scores.factualAccuracy < 0.5) weakAspects.push('事实准确性');
+        if (scores.audienceFit < 0.5) weakAspects.push('读者适配度');
+        if (scores.styleAdherence < 0.5) weakAspects.push('风格一致性');
+
+        if (weakAspects.length > 0) {
+          const clarificationMsg = [
+            `\n💡 我对这段话的${weakAspects.join('、')}不太确定。`,
+            `你能帮我确认一下吗？`,
+            `直接告诉我需要怎么改，或者 /accept 保持现状。`,
+          ].join('\n');
+
+          return `✍️ ${this.progress()} ${section.title}\n\n${content}${clarificationMsg}`;
+        }
       }
       // Use normalized uncertainties for display
       const safeUncertainties = normalizeUncertainties(uncertainties);
@@ -689,10 +707,27 @@ ${critique.rewriteInstructions}
     if (this.discoverySummary) {
       ctx.creativeDNA += '\n\n## 已确认信息\n' + this.discoverySummary.slice(0, 300);
     }
-    // Inject style fingerprint constraints
-    const styleConstraints = getCompactStyleConstraints(this.styleFingerprint);
-    if (styleConstraints) {
-      ctx.creativeDNA += '\n\n' + styleConstraints;
+    // Enhanced style injection based on StyleVector theory
+    // Contrast: show both "what to do" and "what NOT to do"
+    if (this.styleFingerprint.confidence > 0.3) {
+      const fullConstraints = buildStyleConstraints(this.styleFingerprint);
+      if (fullConstraints) {
+        ctx.creativeDNA += '\n\n' + fullConstraints;
+      }
+
+      // Add contrastive examples: show the user what they DON'T want
+      const resistances = this.styleFingerprint.resistance.slice(0, 3);
+      if (resistances.length > 0) {
+        ctx.creativeDNA += '\n\n### 对比示例（避免 → 偏好）';
+        for (const r of resistances) {
+          const association = this.styleFingerprint.associations.find((a) =>
+            a.from.includes(r.pattern.slice(0, 10)),
+          );
+          if (association) {
+            ctx.creativeDNA += `\n- ❌ "${r.pattern.slice(0, 30)}" → ✅ "${association.to.slice(0, 30)}"`;
+          }
+        }
+      }
     }
     return ctx;
   }

@@ -251,6 +251,33 @@ export function getCompactStyleConstraints(fp: StyleFingerprint): string {
   return `风格约束: 避免[${avoid}] | 细节度${fp.attentionBias.detailLevel}/5 | ${fp.attentionBias.emotionalRegister}`;
 }
 
+/**
+ * Generate contrastive examples for style injection.
+ * "This is what you DO want, this is what you DON'T want"
+ * Based on the Contrastive Examples (CE) technique.
+ */
+export function buildContrastiveExamples(fp: StyleFingerprint): string {
+  if (fp.confidence < 0.3 || fp.resistance.length === 0) return '';
+
+  const examples: string[] = [];
+  examples.push('\n## 对比示例');
+
+  for (const r of fp.resistance.slice(0, 3)) {
+    // Find the association that replaced this resistance
+    const replacement = fp.associations.find((a) => a.from.includes(r.pattern.slice(0, 15)));
+
+    examples.push(`\n❌ 不要这样写（已被拒绝${r.count}次）:`);
+    examples.push(`   "${r.pattern.slice(0, 60)}"`);
+
+    if (replacement) {
+      examples.push(`✅ 应该这样写:`);
+      examples.push(`   "${replacement.to.slice(0, 60)}"`);
+    }
+  }
+
+  return examples.join('\n');
+}
+
 // =========================================================================
 // Helpers
 // =========================================================================
