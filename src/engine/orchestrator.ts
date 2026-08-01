@@ -49,6 +49,12 @@ import {
   generatePerspectiveQuestions,
 } from '@/runtime/discovery/socratic-engine';
 import { questionTracker } from '@/runtime/discovery/question-tracker';
+import {
+  detectUnknownGenre,
+  discoverGenre,
+  generateDynamicQuestions,
+  generateDynamicOutline,
+} from '@/runtime/rag/dynamic-genre';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -237,6 +243,36 @@ export class SculptorOrchestrator {
 
     // Step 1: Extract creative assets (metaphors, decisions)
     extractCreativeAssets(input, this.state.creativeMemory);
+
+    // Dynamic Genre Detection: check for unknown creative types FIRST
+    // This must run BEFORE consensus reflection to prevent misclassification
+    const unknownGenre = detectUnknownGenre(input);
+    if (unknownGenre) {
+      const genre = await discoverGenre(input);
+      // Update belief with discovered genre info
+      reviseBelief(this.state.belief, { artifact: genre.name }, `动态发现类型: ${genre.name}`);
+      reviseBelief(this.state.belief, { topic: input }, `主题: ${input}`);
+
+      // Generate targeted questions for this genre
+      const questions = generateDynamicQuestions(genre);
+      const structure = generateDynamicOutline(genre, input);
+
+      return [
+        `🔍 检测到你提到了 **${genre.name}**（${genre.category}）`,
+        ``,
+        `📖 ${genre.definition}`,
+        ``,
+        `与以下类型不同: ${genre.distinguishingFeatures.join('、')}`,
+        ``,
+        `📐 建议结构:`,
+        ...structure.map((s, i) => `  ${i + 1}. ${s}`),
+        ``,
+        `❓ 帮你理清思路:`,
+        ...questions.map((q, i) => `  ${i + 1}. ${q}`),
+        ``,
+        `先聊聊你的具体需求？`,
+      ].join('\n');
+    }
 
     // Consensus Reflection: validate shared understanding FIRST
     // Only do this on the first interaction (when no hypotheses exist yet)
