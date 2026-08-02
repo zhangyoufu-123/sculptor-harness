@@ -55,6 +55,13 @@ import {
   generateDynamicQuestions,
   generateDynamicOutline,
 } from '@/runtime/rag/dynamic-genre';
+import { loadDocument, summarizeDocument } from '@/runtime/import/document-loader';
+import {
+  extractBlueprint,
+  summarizeBlueprint,
+  type ExtractedBlueprint,
+} from '@/runtime/import/blueprint-extractor';
+import { rewriteBlueprint, type RewriteStyle } from '@/runtime/import/multi-style-rewriter';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -212,6 +219,89 @@ export class SculptorOrchestrator {
         outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
         '\n\n输入 "确认" 开始写作，或告诉我需要调整的地方。'
       );
+    }
+
+    // Handle /import command
+    if (userInput.startsWith('/import')) {
+      const filePath = userInput.replace('/import', '').trim();
+      if (!filePath) return '请指定文件路径: /import <文件路径>';
+
+      const doc = loadDocument(filePath);
+      if (!doc) return `❌ 无法加载文件: ${filePath}`;
+
+      // Extract blueprint
+      const summary = summarizeDocument(doc);
+      const blueprint = await extractBlueprint(doc);
+      const bpSummary = summarizeBlueprint(blueprint);
+
+      // Store in creative memory as source material
+      this.state.creativeMemory.constraints.mustInclude.push(`源文件: ${doc.fileName}`);
+      this.state.creativeMemory.keyMessages.push(doc.content.slice(0, 500));
+
+      // Store blueprint for later rewriting
+      (this.state as unknown as Record<string, unknown>).importedBlueprint = blueprint;
+      (this.state as unknown as Record<string, unknown>).importedContent = doc.content;
+
+      return [
+        `✅ 文档已导入`,
+        ``,
+        summary,
+        ``,
+        bpSummary,
+        ``,
+        '可用命令:',
+        '  /rewrite academic — 改写为学术论文',
+        '  /rewrite popular — 改写为通俗科普',
+        '  /rewrite ppt — 改写为PPT文案',
+        '  /rewrite social — 改写为社交媒体',
+        '  /rewrite executive — 改写为执行摘要',
+        '  /rewrite narrative — 改写为叙事散文',
+        '  /style — 查看原文档风格特征',
+      ].join('\n');
+    }
+
+    // Handle /rewrite command
+    if (userInput.startsWith('/rewrite')) {
+      const styleName = userInput.replace('/rewrite', '').trim();
+      const bp = (this.state as unknown as Record<string, unknown>)
+        .importedBlueprint as ExtractedBlueprint;
+      const content = (this.state as unknown as Record<string, unknown>).importedContent as string;
+
+      if (!bp || !content) return '请先导入文档: /import <文件路径>';
+
+      const styleMap: Record<string, RewriteStyle> = {
+        academic: 'academic',
+        popular: 'popular',
+        ppt: 'ppt',
+        social: 'social',
+        executive: 'executive',
+        narrative: 'narrative',
+        technical: 'technical',
+        preserve: 'preserve',
+      };
+      const style = styleMap[styleName] || 'preserve';
+
+      const results = await rewriteBlueprint(bp, content, {
+        style,
+        preserveClaims: true,
+        addExamples: style === 'popular' || style === 'social',
+      });
+
+      return [
+        `🔄 已改写为 ${style} 风格 (${results.length} 节)`,
+        '',
+        ...results.map((r) => `## ${r.originalTitle}\n\n${r.rewrittenContent.slice(0, 300)}...`),
+        '',
+        '输入 /full 查看完整改写结果',
+      ].join('\n');
+    }
+
+    // Handle /style command
+    if (userInput === '/style') {
+      const bp = (this.state as unknown as Record<string, unknown>)
+        .importedBlueprint as ExtractedBlueprint;
+      if (!bp) return '请先导入文档: /import <文件路径>';
+      return `🎨 原文档风格特征:\n${bp.stylePatterns.map((p, i) => `  ${i + 1}. ${p}`).join('\n')}\n\n建议改写方向: ${bp.rewriteApproaches.join(' | ')}`;
     }
 
     switch (this.state.phase) {
