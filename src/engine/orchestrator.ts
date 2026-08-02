@@ -61,7 +61,12 @@ import {
   summarizeBlueprint,
   type ExtractedBlueprint,
 } from '@/runtime/import/blueprint-extractor';
-import { rewriteBlueprint, type RewriteStyle } from '@/runtime/import/multi-style-rewriter';
+import {
+  analyzeDocument,
+  generateRewriteStrategy,
+  executeRewrite,
+  type DocumentAnalysis,
+} from '@/runtime/import/multi-style-rewriter';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -229,79 +234,105 @@ export class SculptorOrchestrator {
       const doc = loadDocument(filePath);
       if (!doc) return `❌ 无法加载文件: ${filePath}`;
 
-      // Extract blueprint
       const summary = summarizeDocument(doc);
       const blueprint = await extractBlueprint(doc);
       const bpSummary = summarizeBlueprint(blueprint);
+
+      // Deep document analysis (Phase 1)
+      const analysis = await analyzeDocument(doc.content, blueprint);
 
       // Store in creative memory as source material
       this.state.creativeMemory.constraints.mustInclude.push(`源文件: ${doc.fileName}`);
       this.state.creativeMemory.keyMessages.push(doc.content.slice(0, 500));
 
-      // Store blueprint for later rewriting
+      // Store everything
       (this.state as unknown as Record<string, unknown>).importedBlueprint = blueprint;
       (this.state as unknown as Record<string, unknown>).importedContent = doc.content;
+      (this.state as unknown as Record<string, unknown>).docAnalysis = analysis;
 
       return [
-        `✅ 文档已导入`,
+        `✅ 文档已导入并深度分析`,
         ``,
         summary,
         ``,
         bpSummary,
         ``,
-        '可用命令:',
-        '  /rewrite academic — 改写为学术论文',
-        '  /rewrite popular — 改写为通俗科普',
-        '  /rewrite ppt — 改写为PPT文案',
-        '  /rewrite social — 改写为社交媒体',
-        '  /rewrite executive — 改写为执行摘要',
-        '  /rewrite narrative — 改写为叙事散文',
-        '  /style — 查看原文档风格特征',
+        `🔬 深度分析结果:`,
+        `  类型: ${analysis.documentType}`,
+        `  复杂度: ${analysis.complexity}`,
+        `  主题: ${analysis.themes.join('、')}`,
+        `  语气: ${analysis.tone}`,
+        `  核心论点: ${analysis.coreArguments.slice(0, 3).join('；')}`,
+        `  可改进: ${analysis.weaknesses.join('；')}`,
+        ``,
+        '请告诉我你想怎么改写（例如："写成PPT演讲稿"、"通俗化"、"改成学术论文"），',
+        '或者直接输入 /rewrite 让我根据对话上下文自动判断。',
       ].join('\n');
     }
 
-    // Handle /rewrite command
+    // Handle /rewrite command — LLM-driven, no style picking
     if (userInput.startsWith('/rewrite')) {
-      const styleName = userInput.replace('/rewrite', '').trim();
+      const userGoal = userInput.replace('/rewrite', '').trim();
       const bp = (this.state as unknown as Record<string, unknown>)
         .importedBlueprint as ExtractedBlueprint;
       const content = (this.state as unknown as Record<string, unknown>).importedContent as string;
+      const analysis = (this.state as unknown as Record<string, unknown>)
+        .docAnalysis as DocumentAnalysis;
 
-      if (!bp || !content) return '请先导入文档: /import <文件路径>';
+      if (!bp || !content || !analysis) return '请先导入文档: /import <文件路径>';
 
-      const styleMap: Record<string, RewriteStyle> = {
-        academic: 'academic',
-        popular: 'popular',
-        ppt: 'ppt',
-        social: 'social',
-        executive: 'executive',
-        narrative: 'narrative',
-        technical: 'technical',
-        preserve: 'preserve',
-      };
-      const style = styleMap[styleName] || 'preserve';
+      // If user didn't specify a goal, try to infer from conversation
+      const goal = userGoal || this.state.belief.intent.value || '优化表达并适配更广泛的读者';
 
-      const results = await rewriteBlueprint(bp, content, {
-        style,
-        preserveClaims: true,
-        addExamples: style === 'popular' || style === 'social',
-      });
+      // Phase 2: Generate rewrite strategy
+      const strategy = await generateRewriteStrategy(analysis, goal, bp);
+
+      // Phase 3: Execute rewrite
+      const result = await executeRewrite(bp, content, strategy);
+
+      // Store result for later use
+      (this.state as unknown as Record<string, unknown>).lastRewriteResult = result;
 
       return [
-        `🔄 已改写为 ${style} 风格 (${results.length} 节)`,
+        `🎯 改写策略（LLM自动生成）`,
+        `  格式: ${strategy.outputFormat}`,
+        `  读者: ${strategy.targetAudience}`,
+        `  语气: ${strategy.tone}`,
+        `  角度: ${strategy.angles.join('、')}`,
+        ``,
+        `📝 改写结果（${result.sections.length}节）`,
         '',
-        ...results.map((r) => `## ${r.originalTitle}\n\n${r.rewrittenContent.slice(0, 300)}...`),
-        '',
-        '输入 /full 查看完整改写结果',
+        result.fullOutput.slice(0, 2000) +
+          (result.fullOutput.length > 2000 ? '\n\n... (输入 /full 查看完整结果)' : ''),
       ].join('\n');
     }
 
-    // Handle /style command
+    // Handle /style — show document analysis
     if (userInput === '/style') {
-      const bp = (this.state as unknown as Record<string, unknown>)
-        .importedBlueprint as ExtractedBlueprint;
-      if (!bp) return '请先导入文档: /import <文件路径>';
-      return `🎨 原文档风格特征:\n${bp.stylePatterns.map((p, i) => `  ${i + 1}. ${p}`).join('\n')}\n\n建议改写方向: ${bp.rewriteApproaches.join(' | ')}`;
+      const analysis = (this.state as unknown as Record<string, unknown>)
+        .docAnalysis as DocumentAnalysis;
+      if (!analysis) return '请先导入文档: /import <文件路径>';
+      return [
+        `🔬 文档深度分析`,
+        ``,
+        `类型: ${analysis.documentType}`,
+        `原读者: ${analysis.originalAudience}`,
+        `复杂度: ${analysis.complexity}`,
+        `结构: ${analysis.structurePattern}`,
+        `语气: ${analysis.tone}`,
+        ``,
+        `主题:`,
+        ...analysis.themes.map((t, i) => `  ${i + 1}. ${t}`),
+        ``,
+        `写作特点:`,
+        ...analysis.stylisticFeatures.map((f, i) => `  ${i + 1}. ${f}`),
+        ``,
+        `核心论点:`,
+        ...analysis.coreArguments.map((a, i) => `  ${i + 1}. ${a}`),
+        ``,
+        `改进空间:`,
+        ...analysis.weaknesses.map((w, i) => `  ${i + 1}. ${w}`),
+      ].join('\n');
     }
 
     switch (this.state.phase) {
