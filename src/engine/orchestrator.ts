@@ -16,6 +16,7 @@ import { extractStyle } from '@/runtime/style/style-extractor';
 import { styleVectorStore } from '@/runtime/style/style-vector-store';
 import type { StyleProfile } from '@/prompts/discovery/style-extraction.prompt';
 import type { ExtractionResult } from '@/runtime/style/style-extractor';
+import { captureEdit } from '@/runtime/style/edit-capture';
 
 import { LLMClient } from '@/lib/llm-client';
 import { WritingAgent } from '@/agent/writing-agent';
@@ -122,6 +123,9 @@ export interface SessionState {
   styleProfile?: StyleProfile | null;
   extractionResult?: ExtractionResult | null;
   styleOnboardingComplete?: boolean;
+
+  // ── Edit Capture ──
+  lastGeneratedText?: string;
 }
 
 // =========================================================================
@@ -1108,6 +1112,17 @@ export class SculptorOrchestrator {
   // =========================================================================
 
   async handleWriting(input: string): Promise<string> {
+    // ── Capture human edit for style learning ──
+    // Compare user's input against last AI-generated text.
+    // When user directly edits/copy-pastes modified text, this extracts style signals.
+    if (this.state.lastGeneratedText && input.length > 10) {
+      const captureResult = captureEdit(this.state.lastGeneratedText, input);
+      if (captureResult.hasEdits) {
+        console.log(`[StyleEdit] ${captureResult.changes.join(' | ')}`);
+      }
+      this.state.lastGeneratedText = input; // Update baseline for next comparison
+    }
+
     if (!this.writingAgent) {
       // Build full handoff context from discovery phase
       const handoffContext = [
@@ -1136,6 +1151,13 @@ export class SculptorOrchestrator {
         content: this.writingAgent!.getOutline()[i]?.content || s.content,
       }));
       if (result.phase === 'done') this.state.phase = 'done';
+
+      // Store AI-generated text for future edit comparison
+      const draft = this.writingAgent.state.currentDraft;
+      const activeIdx = draft?.activeVersionIndex ?? -1;
+      const version = activeIdx >= 0 ? draft?.versions[activeIdx] : undefined;
+      if (version?.content) this.state.lastGeneratedText = version.content;
+
       return (
         `开始写作！共 ${this.state.outline.length} 节。\n` +
         `第一节: **${this.state.outline[0].title}**\n\n` +
@@ -1148,6 +1170,13 @@ export class SculptorOrchestrator {
       content: this.writingAgent!.getOutline()[i]?.content || s.content,
     }));
     if (result.phase === 'done') this.state.phase = 'done';
+
+    // Store AI-generated text for future edit comparison
+    const draft = this.writingAgent.state.currentDraft;
+    const activeIdx = draft?.activeVersionIndex ?? -1;
+    const version = activeIdx >= 0 ? draft?.versions[activeIdx] : undefined;
+    if (version?.content) this.state.lastGeneratedText = version.content;
+
     return result.response;
   }
 

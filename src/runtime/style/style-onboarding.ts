@@ -11,6 +11,11 @@
 
 import { extractStyle, type ExtractionResult } from './style-extractor';
 import { styleVectorStore } from './style-vector-store';
+import {
+  generateForbiddenList,
+  formatForbiddenList,
+  type ForbiddenList,
+} from './forbidden-generator';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -30,6 +35,8 @@ export interface OnboardingState {
   result: ExtractionResult | null;
   /** User corrections to the profile */
   corrections: Record<string, string>;
+  /** Forbidden list generated from negative space analysis */
+  forbiddenList?: ForbiddenList;
 }
 
 // ─── Onboarding ───────────────────────────────────────────────
@@ -85,6 +92,13 @@ export class StyleOnboarding {
     }
 
     this.state.stage = 'showing_results';
+
+    // Generate forbidden list based on extracted style
+    if (result.profile) {
+      const forbidden = await generateForbiddenList(this.state.sampleText, result.profile);
+      this.state.forbiddenList = forbidden;
+    }
+
     return this.formatResults(result);
   }
 
@@ -167,7 +181,15 @@ export class StyleOnboarding {
     const lines: string[] = [];
     lines.push(result.userFeedback);
     lines.push('');
-    lines.push('有哪里不对吗？告诉我，我会调整。如果差不多，输入 /done 继续。');
+
+    if (this.state.forbiddenList) {
+      lines.push(formatForbiddenList(this.state.forbiddenList));
+      lines.push('');
+      lines.push('有要修改的吗？告诉我。如果差不多，输入 /done 继续。');
+    } else {
+      lines.push('有哪里不对吗？告诉我，我会调整。如果差不多，输入 /done 继续。');
+    }
+
     return lines.join('\n');
   }
 }
