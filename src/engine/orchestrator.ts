@@ -10,7 +10,16 @@
 
 // Agent Cluster
 import { agentBus, ensureAgentsActive, type AgentRole } from '@/agents/cluster';
-import { predictUserChoices, recordUserChoice } from '@/runtime/style/style-predictor';
+import {
+  predictUserChoices,
+  recordUserChoice,
+  formatStyleContext,
+} from '@/runtime/style/style-predictor';
+import { styleOnboarding, looksLikePastedText } from '@/runtime/style/style-onboarding';
+import { extractStyle } from '@/runtime/style/style-extractor';
+import { styleVectorStore } from '@/runtime/style/style-vector-store';
+import type { StyleProfile } from '@/prompts/discovery/style-extraction.prompt';
+import type { ExtractionResult } from '@/runtime/style/style-extractor';
 
 import { LLMClient } from '@/lib/llm-client';
 import { WritingAgent } from '@/agent/writing-agent';
@@ -112,6 +121,11 @@ export interface SessionState {
     mostLikely: number;
   };
   lastStyleContext?: string;
+
+  // ── Style Extraction ──
+  styleProfile?: StyleProfile | null;
+  extractionResult?: ExtractionResult | null;
+  styleOnboardingComplete?: boolean;
 }
 
 // =========================================================================
@@ -172,6 +186,58 @@ export class SculptorOrchestrator {
 
   async processInput(userInput: string): Promise<string> {
     this.state.messages.push({ role: 'user', content: userInput });
+
+    // ── Style Onboarding Flow ──────────────────────────────
+    if (!styleOnboarding.isDone() && this.state.phase !== 'done') {
+      const stage = styleOnboarding.getStage();
+
+      // Stage: waiting for sample
+      if (stage === 'waiting_for_sample') {
+        if (userInput.trim() === '/skip') {
+          return styleOnboarding.skip();
+        }
+
+        // Check if user pasted text
+        if (looksLikePastedText(userInput)) {
+          const result = await styleOnboarding.processSample(userInput);
+
+          // Store extraction result for later use
+          this.state.styleProfile = styleOnboarding.getResult()?.profile || null;
+          this.state.extractionResult = styleOnboarding.getResult() || null;
+
+          return result;
+        }
+
+        // User didn't paste text and didn't skip — proceed
+        styleOnboarding.skip();
+        // Fall through to normal processing
+      }
+
+      // Stage: waiting for confirmation
+      if (stage === 'showing_results' || stage === 'waiting_for_confirmation') {
+        const { response, isDone } = styleOnboarding.handleConfirmation(userInput);
+        if (!isDone) return response;
+        // Otherwise, onboarding done — fall through to normal processing
+      }
+    }
+
+    // ── Opportunistic Style Extraction ─────────────────────
+    // If user pastes long text during discovery, extract style
+    if (
+      this.state.phase === 'discovery' &&
+      looksLikePastedText(userInput) &&
+      !this.state.styleProfile
+    ) {
+      try {
+        const result = await extractStyle(userInput);
+        if (result.success) {
+          this.state.styleProfile = result.profile;
+          this.state.extractionResult = result;
+        }
+      } catch {
+        // Non-blocking: style extraction failure shouldn't break discovery
+      }
+    }
 
     // Handle /outline command
     if (userInput.startsWith('/outline')) {
@@ -457,6 +523,8 @@ export class SculptorOrchestrator {
       strongEmotionDetected: this.state.lastEmotionWasStrong || false,
       importedBlueprint: this.state.importedBlueprint || null,
       importedContent: this.state.importedContent || null,
+      styleContext: formatStyleContext(),
+      styleConfidence: styleVectorStore.getSnapshot().confidence,
     });
   }
 

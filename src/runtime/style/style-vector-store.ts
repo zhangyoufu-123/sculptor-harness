@@ -10,6 +10,7 @@
  * and the vector is updated via gradient descent on prediction error.
  */
 
+/* eslint-disable no-console */
 // ─── Types ────────────────────────────────────────────────────
 
 export interface StyleVector {
@@ -178,6 +179,87 @@ export class StyleVectorStore {
         this.vector.attentionFocus.delete(key);
       }
     });
+  }
+
+  /**
+   * Record external feedback (from critique) to correct the vector.
+   * Unlike recordChoice (which learns from user preference),
+   * recordFeedback CORRECTS the vector based on external evaluation.
+   *
+   * This is the "Retrain" phase — reverse gradient descent from critique.
+   */
+  recordFeedback(feedback: {
+    /** Dimension to correct (1=personal dataset, 2=deviation, 3=attention) */
+    dimension: 1 | 2 | 3;
+    /** The feature text to adjust */
+    feature: string;
+    /** Correction magnitude (-1 to 1, negative = reduce, positive = strengthen) */
+    correction: number;
+    /** Reason for the correction */
+    reason: string;
+  }): void {
+    if (Math.abs(feedback.correction) < 0.05) return; // Too small — skip
+
+    const embedding = this.simpleEmbed(feedback.feature);
+    const lr = this.learningRate * 2; // Feedback learning rate is higher (external signal is strong)
+
+    switch (feedback.dimension) {
+      case 1: {
+        // D1: Adjust personal dataset embedding
+        for (let i = 0; i < 512; i++) {
+          this.vector.personalDataset[i] += embedding[i] * lr * feedback.correction;
+        }
+        break;
+      }
+      case 2: {
+        // D2: Adjust deviation vector
+        for (let i = 0; i < 128; i++) {
+          this.vector.writingDeviation[i] += embedding[i % 128] * lr * feedback.correction * 0.5;
+        }
+        break;
+      }
+      case 3: {
+        // D3: Adjust attention focus
+        const tokens = this.tokenize(feedback.feature);
+        for (const token of tokens) {
+          if (token.length < 2) continue;
+          const current = this.vector.attentionFocus.get(token) || 0;
+          const adjusted = Math.max(0, Math.min(1, current + feedback.correction * 0.2));
+          if (adjusted < 0.01) {
+            this.vector.attentionFocus.delete(token);
+          } else {
+            this.vector.attentionFocus.set(token, adjusted);
+          }
+        }
+        break;
+      }
+    }
+
+    // Feedback increases confidence faster than regular choices
+    this.confidence = Math.min(1, this.confidence + 0.02 * Math.abs(feedback.correction));
+  }
+
+  /**
+   * Apply a batch of feedback corrections at once.
+   */
+  applyFeedbackBatch(
+    feedbacks: Array<{
+      dimension: 1 | 2 | 3;
+      feature: string;
+      correction: number;
+      reason: string;
+    }>,
+  ): void {
+    // Sort by correction magnitude (largest first)
+    const sorted = [...feedbacks].sort((a, b) => Math.abs(b.correction) - Math.abs(a.correction));
+
+    for (const fb of sorted) {
+      this.recordFeedback(fb);
+    }
+
+    console.log(
+      `[StyleVectorStore] Applied ${sorted.length} feedback corrections. Confidence: ${(this.confidence * 100).toFixed(0)}%`,
+    );
   }
 
   /** Get a snapshot of the current style vector */
