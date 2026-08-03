@@ -21,6 +21,8 @@ export const CONTEXT_QUESTIONER_PROMPT: PromptTemplate = {
 **完整上下文**
 {{discovery_context}}
 
+{{style_context}}
+
 **用户刚说**
 "{{user_input}}"
 
@@ -60,7 +62,7 @@ C. [选项C——第三个角度]
   A. 你想让他们通过你的文章了解红楼的什么？——历史事实还是你的个人感受？
   B. 你希望他们读完后的第一反应是什么？——了解更多历史，还是被你打动？
   C. 你想象老师在课上念你的文章——你最想让老师读到哪一段？`,
-  variables: ['discovery_context', 'user_input', 'framework_stage', 'stage_need'],
+  variables: ['discovery_context', 'user_input', 'framework_stage', 'stage_need', 'style_context'],
   systemPrompt: '你是追问设计师。从用户话语中自然生长问题。提供选项而非开放式提问。',
   maxTokens: 500,
 };

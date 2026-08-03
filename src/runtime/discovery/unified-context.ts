@@ -61,6 +61,10 @@ export interface DiscoveryContext {
   lastEmpathyAck: string; // Last empathy acknowledgment sent
   strongEmotionDetected: boolean;
 
+  // ── Style Vector ──
+  styleContext: string; // Formatted style context for prompts
+  styleConfidence: number; // Current style prediction confidence
+
   // ── Import (if any) ──
   importedBlueprint: ExtractedBlueprint | null;
   importedContent: string | null;
@@ -90,6 +94,8 @@ export function buildDiscoveryContext(params: {
   strongEmotionDetected?: boolean;
   importedBlueprint?: ExtractedBlueprint | null;
   importedContent?: string | null;
+  styleContext?: string;
+  styleConfidence?: number;
 }): DiscoveryContext {
   // Build belief summary
   const beliefParts: string[] = [];
@@ -148,6 +154,8 @@ export function buildDiscoveryContext(params: {
     styleDirectionConfirmed: params.styleDirectionConfirmed || false,
     lastEmpathyAck: params.lastEmpathyAck || '',
     strongEmotionDetected: params.strongEmotionDetected || false,
+    styleContext: params.styleContext || '',
+    styleConfidence: params.styleConfidence || 0,
     importedBlueprint: params.importedBlueprint || null,
     importedContent: params.importedContent || null,
   };

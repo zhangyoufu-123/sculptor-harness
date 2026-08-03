@@ -8,6 +8,10 @@
  * 4. Coordinates the conversation flow
  */
 
+// Agent Cluster
+import { agentBus, ensureAgentsActive, type AgentRole } from '@/agents/cluster';
+import { predictUserChoices, recordUserChoice } from '@/runtime/style/style-predictor';
+
 import { LLMClient } from '@/lib/llm-client';
 import { WritingAgent } from '@/agent/writing-agent';
 import {
@@ -99,6 +103,15 @@ export interface SessionState {
   importedBlueprint?: ExtractedBlueprint;
   importedContent?: string;
   currentInput?: string;
+
+  // ── Agent Cluster ──
+  lastPrediction?: {
+    question: string;
+    options: string[];
+    predictedProbs: number[];
+    mostLikely: number;
+  };
+  lastStyleContext?: string;
 }
 
 // =========================================================================
@@ -138,6 +151,19 @@ export class SculptorOrchestrator {
       importedContent: undefined,
       currentInput: '',
     };
+
+    // Initialize agent cluster
+    ensureAgentsActive('question');
+
+    // Subscribe to style vector updates for writing phase
+    agentBus.on('style_vector_updated', (event) => {
+      if (this.state.phase === 'writing') {
+        const styleContext = (event.payload as { styleContext?: string }).styleContext;
+        if (styleContext) {
+          this.state.lastStyleContext = styleContext;
+        }
+      }
+    });
   }
 
   // =========================================================================
@@ -397,6 +423,7 @@ export class SculptorOrchestrator {
       has_framework: ctx.articleFramework ? 'yes' : 'no',
       framework_stage: ctx.frameworkStage,
       stage_need: ctx.frameworkProgress || '收集本阶段素材',
+      style_context: ctx.styleContext ? `\n【风格学习】${ctx.styleContext}` : '',
       ...extraVars,
     });
 
@@ -441,6 +468,36 @@ export class SculptorOrchestrator {
     if (this.state.lastQuestion && this.state.belief.roundCount > 1) {
       const answered = userInput.length > 5 ? userInput.slice(0, 80) : userInput;
       questionTracker.recordAnswer(this.state.lastQuestion, answered);
+
+      // Record user choice if previous question had options
+      if (this.state.lastPrediction) {
+        const chosenOption = this.determineChosenOption(
+          userInput,
+          this.state.lastPrediction.options,
+        );
+        if (chosenOption !== undefined) {
+          agentBus.emit({
+            type: 'user_choice_made',
+            source: 'question_agent' as AgentRole,
+            payload: {
+              question: this.state.lastPrediction.question,
+              options: this.state.lastPrediction.options,
+              chosenIndex: chosenOption,
+              predictedProbs: this.state.lastPrediction.predictedProbs,
+            },
+            priority: 'high',
+          });
+
+          // Record for style learning
+          recordUserChoice(
+            this.state.lastPrediction.question,
+            this.state.lastPrediction.options,
+            chosenOption,
+            this.state.lastPrediction.predictedProbs,
+          );
+        }
+        this.state.lastPrediction = undefined;
+      }
     }
 
     // ─── SKILL PIPELINE ───────────────────────────────────────
@@ -591,6 +648,40 @@ export class SculptorOrchestrator {
       const questionText = questionResponse.text?.trim() || '';
       if (questionText) {
         this.state.lastQuestion = questionText;
+
+        // Extract options from the question text (parse A/B/C format)
+        const optionLines = questionText.split('\n').filter((l) => /^[A-C][.、]/.test(l.trim()));
+        const options = optionLines.map((l) => l.replace(/^[A-C][.、]\s*/, '').trim());
+
+        if (options.length >= 2) {
+          // Predict user's likely choice
+          const prediction = predictUserChoices(options);
+
+          // Store prediction for when user responds
+          this.state.lastPrediction = {
+            question: questionText,
+            options,
+            predictedProbs: prediction.optionProbs,
+            mostLikely: prediction.mostLikely,
+          };
+
+          // Emit event to Agent Bus
+          agentBus.emit({
+            type: 'question_generated',
+            source: 'question_agent' as AgentRole,
+            payload: {
+              question: questionText,
+              options,
+              predictedProbs: prediction.optionProbs,
+              phase: 'discovery',
+            },
+            priority: 'medium',
+          });
+
+          // Ensure recording agents are active
+          ensureAgentsActive('question');
+        }
+
         return questionText;
       }
     } catch {
@@ -836,5 +927,45 @@ export class SculptorOrchestrator {
   /** Get current state for display */
   getState(): SessionState {
     return this.state;
+  }
+
+  /** Determine which option the user chose from their response */
+  private determineChosenOption(userInput: string, options: string[]): number | undefined {
+    const trimmed = userInput.trim().toLowerCase();
+
+    // Direct letter match: "A", "B", "C"
+    const letterMatch = trimmed.match(/^[a-c]$/);
+    if (letterMatch) {
+      return letterMatch[0].charCodeAt(0) - 97;
+    }
+
+    // Chinese number match: "一"、"二"、"三"
+    const cnNums: Record<string, number> = { 一: 0, 二: 1, 三: 2 };
+    if (cnNums[trimmed] !== undefined) return cnNums[trimmed];
+
+    // Best substring match against options
+    let bestMatch = -1;
+    let bestScore = 0;
+    for (let i = 0; i < options.length; i++) {
+      const score = this.textSimilarity(trimmed, options[i].toLowerCase());
+      if (score > bestScore && score > 0.3) {
+        bestScore = score;
+        bestMatch = i;
+      }
+    }
+
+    return bestMatch >= 0 ? bestMatch : undefined;
+  }
+
+  /** Simple Jaccard-like similarity for option matching */
+  private textSimilarity(a: string, b: string): number {
+    const tokensA = Array.from(new Set(a.split('')));
+    const tokensB = new Set(b.split(''));
+    let intersection = 0;
+    for (const t of tokensA) {
+      if (tokensB.has(t)) intersection++;
+    }
+    const union = tokensA.length + tokensB.size - intersection;
+    return union > 0 ? intersection / union : 0;
   }
 }
