@@ -11,6 +11,14 @@
  */
 
 /* eslint-disable no-console */
+import * as fs from 'fs';
+import * as path from 'path';
+
+// ─── Persistence ───────────────────────────────────────────────
+
+const PERSISTENCE_DIR = path.resolve(process.cwd(), '.sculptor');
+const VECTOR_FILE = path.join(PERSISTENCE_DIR, 'style-vector.json');
+
 // ─── Types ────────────────────────────────────────────────────
 
 export interface StyleVector {
@@ -89,6 +97,14 @@ export class StyleVectorStore {
       writingDeviation: new Float64Array(128),
       attentionFocus: new Map(),
     };
+
+    // Auto-load from disk if available
+    const loaded = this.load();
+    if (loaded) {
+      console.log(
+        `[StyleVectorStore] Loaded from disk. Confidence: ${(this.confidence * 100).toFixed(0)}%`,
+      );
+    }
   }
 
   // ── Core Operations ──────────────────────────────────────
@@ -132,6 +148,11 @@ export class StyleVectorStore {
   /** Record a user choice and update the vector */
   recordChoice(choice: ChoiceRecord): void {
     this.choices.push(choice);
+
+    // Cap choice history at 200
+    if (this.choices.length > 200) {
+      this.choices = this.choices.slice(-100);
+    }
 
     // Compute prediction error
     const predProb = choice.predictedProbs[choice.actualChoice] || 0;
@@ -179,6 +200,11 @@ export class StyleVectorStore {
         this.vector.attentionFocus.delete(key);
       }
     });
+
+    // Auto-save after every 5 choices
+    if (this.choices.length % 5 === 0) {
+      this.save();
+    }
   }
 
   /**
@@ -260,6 +286,9 @@ export class StyleVectorStore {
     console.log(
       `[StyleVectorStore] Applied ${sorted.length} feedback corrections. Confidence: ${(this.confidence * 100).toFixed(0)}%`,
     );
+
+    // Auto-save after batch
+    this.save();
   }
 
   /** Get a snapshot of the current style vector */
@@ -307,6 +336,70 @@ export class StyleVectorStore {
     this.confidence = 0;
     this.techniqueFreq.clear();
     this.associationFreq.clear();
+  }
+
+  /** Save the current vector state to disk */
+  save(): void {
+    try {
+      if (!fs.existsSync(PERSISTENCE_DIR)) {
+        fs.mkdirSync(PERSISTENCE_DIR, { recursive: true });
+      }
+
+      const data = {
+        personalDataset: Array.from(this.vector.personalDataset),
+        writingDeviation: Array.from(this.vector.writingDeviation),
+        attentionFocus: Array.from(this.vector.attentionFocus.entries()),
+        confidence: this.confidence,
+        totalChoices: this.choices.length,
+        savedAt: new Date().toISOString(),
+      };
+
+      fs.writeFileSync(VECTOR_FILE, JSON.stringify(data), 'utf-8');
+    } catch (err) {
+      // Persistence failure should not crash the system
+      console.error('[StyleVectorStore] Failed to save:', (err as Error).message);
+    }
+  }
+
+  /** Load vector state from disk. Returns true if successful. */
+  load(): boolean {
+    try {
+      if (!fs.existsSync(VECTOR_FILE)) return false;
+
+      const raw = fs.readFileSync(VECTOR_FILE, 'utf-8');
+      const data = JSON.parse(raw) as {
+        personalDataset: number[];
+        writingDeviation: number[];
+        attentionFocus: [string, number][];
+        confidence: number;
+        totalChoices: number;
+      };
+
+      // Restore D1
+      if (data.personalDataset && data.personalDataset.length === 512) {
+        this.vector.personalDataset = new Float64Array(data.personalDataset);
+      }
+
+      // Restore D2
+      if (data.writingDeviation && data.writingDeviation.length === 128) {
+        this.vector.writingDeviation = new Float64Array(data.writingDeviation);
+      }
+
+      // Restore D3
+      if (data.attentionFocus) {
+        this.vector.attentionFocus = new Map(data.attentionFocus);
+      }
+
+      // Restore confidence
+      if (typeof data.confidence === 'number') {
+        this.confidence = data.confidence;
+      }
+
+      return true;
+    } catch (err) {
+      console.error('[StyleVectorStore] Failed to load:', (err as Error).message);
+      return false;
+    }
   }
 
   // ── Private Helpers ─────────────────────────────────────

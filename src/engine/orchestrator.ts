@@ -482,26 +482,34 @@ export class SculptorOrchestrator {
           .join('、')}\n置信度: ${(styleSnapshot.confidence * 100).toFixed(0)}%`
       : '尚未学习用户风格';
 
-    const rendered = promptRegistry.render(promptId, {
-      discovery_context: ctxString,
-      user_input: ctx.userInput,
-      topic: ctx.topic,
-      artifact: ctx.artifact,
-      audience: ctx.audience,
-      purpose: ctx.purpose,
-      tone: ctx.tone,
-      known_info: Object.entries(ctx.knownInfo)
-        .map(([k, v]) => `${k}: ${v}`)
-        .join('；'),
-      has_framework: ctx.articleFramework ? 'yes' : 'no',
-      framework_stage: ctx.frameworkStage,
-      stage_need: ctx.frameworkProgress || '收集本阶段素材',
-      style_context: ctx.styleContext ? `\n【风格学习】${ctx.styleContext}` : '',
-      style_profile: styleProfile,
-      ...extraVars,
-    });
-
-    return rendered.prompt;
+    try {
+      const rendered = promptRegistry.render(promptId, {
+        discovery_context: ctxString,
+        user_input: ctx.userInput,
+        topic: ctx.topic,
+        artifact: ctx.artifact,
+        audience: ctx.audience,
+        purpose: ctx.purpose,
+        tone: ctx.tone,
+        known_info: Object.entries(ctx.knownInfo)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('；'),
+        has_framework: ctx.articleFramework ? 'yes' : 'no',
+        framework_stage: ctx.frameworkStage,
+        stage_need: ctx.frameworkProgress || '收集本阶段素材',
+        style_context: ctx.styleContext ? `\n【风格学习】${ctx.styleContext}` : '',
+        style_profile: styleProfile,
+        ...extraVars,
+      });
+      return rendered.prompt;
+    } catch (err) {
+      console.error(
+        `[Orchestrator] Failed to render prompt '${promptId}':`,
+        (err as Error).message,
+      );
+      // Fallback: return a minimal prompt that won't crash the LLM call
+      return `发现上下文: ${ctxString.slice(0, 500)}\n\n用户说: ${ctx.userInput}`;
+    }
   }
 
   /**
@@ -554,7 +562,7 @@ export class SculptorOrchestrator {
         if (chosenOption !== undefined) {
           const chosenText = this.state.lastPrediction.options[chosenOption] || '';
 
-          agentBus.emit({
+          await agentBus.emit({
             type: 'user_choice_made',
             source: 'question_agent' as AgentRole,
             payload: {
@@ -885,7 +893,7 @@ export class SculptorOrchestrator {
           };
 
           // Emit event to Agent Bus
-          agentBus.emit({
+          await agentBus.emit({
             type: 'question_generated',
             source: 'question_agent' as AgentRole,
             payload: {

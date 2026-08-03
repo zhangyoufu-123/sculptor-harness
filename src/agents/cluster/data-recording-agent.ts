@@ -141,6 +141,10 @@ class DataRecordingAgent {
   private getOrCreateRecord(): InteractionRecord {
     const records = this.currentSession.interactions;
     if (records.length === 0 || records[records.length - 1].systemResponse) {
+      // Cap interactions at 100 per session
+      if (records.length >= 100) {
+        records.shift(); // Remove oldest
+      }
       const newRecord: InteractionRecord = {
         round: this.interactionCount + 1,
         userInput: '',

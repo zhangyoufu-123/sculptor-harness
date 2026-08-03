@@ -122,6 +122,10 @@ export class AgentBus {
 
     // Log event
     this.eventLog.push(fullEvent);
+    // Cap event log at 200 entries
+    if (this.eventLog.length > 200) {
+      this.eventLog = this.eventLog.slice(-100);
+    }
     this.memory.recentEvents.push(fullEvent);
     if (this.memory.recentEvents.length > 100) {
       this.memory.recentEvents.shift();

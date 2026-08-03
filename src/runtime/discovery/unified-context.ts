@@ -207,5 +207,10 @@ export function ctxToString(ctx: DiscoveryContext): string {
   parts.push(`\n【对话轮次】第${ctx.roundCount}轮`);
   parts.push(`【置信度】${(ctx.confidence * 100).toFixed(0)}%`);
 
-  return parts.join('\n');
+  const result = parts.join('\n');
+  // Truncation guard: keep under ~3000 chars (~750 tokens) for context economy
+  if (result.length > 3000) {
+    return result.slice(0, 3000) + '\n[...上下文已截断]';
+  }
+  return result;
 }
