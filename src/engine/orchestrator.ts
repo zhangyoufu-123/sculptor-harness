@@ -14,6 +14,8 @@ import { predictUserChoices, formatStyleContext } from '@/runtime/style/style-pr
 import { styleOnboarding, looksLikePastedText } from '@/runtime/style/style-onboarding';
 import { extractStyle } from '@/runtime/style/style-extractor';
 import { styleVectorStore } from '@/runtime/style/style-vector-store';
+import { postProcessAI, formatPostProcessResult } from '@/runtime/style/post-processor';
+import { formatPatternsAsPrompt } from '@/runtime/style/writing-patterns';
 import type { StyleProfile } from '@/prompts/discovery/style-extraction.prompt';
 import type { ExtractionResult } from '@/runtime/style/style-extractor';
 import { captureEdit } from '@/runtime/style/edit-capture';
@@ -446,6 +448,14 @@ export class SculptorOrchestrator {
         `改进空间:`,
         ...analysis.weaknesses.map((w, i) => `  ${i + 1}. ${w}`),
       ].join('\n');
+    }
+
+    // Handle /check-ai command — manually check a piece of text for AI patterns
+    if (userInput.startsWith('/check-ai')) {
+      const textToCheck = userInput.replace('/check-ai', '').trim();
+      if (!textToCheck) return '请提供要检查的文本: /check-ai <文本>';
+      const result = postProcessAI(textToCheck);
+      return formatPostProcessResult(result);
     }
 
     switch (this.state.phase) {
@@ -1142,6 +1152,7 @@ export class SculptorOrchestrator {
         creativeMemory: this.state.creativeMemory,
         conversationContext: handoffContext,
         discoverySummary: handoffSummary,
+        journalismRules: formatPatternsAsPrompt(),
       });
       // Don't return early — pass the input through to the WritingAgent
       // so material collection can begin immediately.

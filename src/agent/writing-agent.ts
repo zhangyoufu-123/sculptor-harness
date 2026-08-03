@@ -11,6 +11,7 @@ import {
   type StyleFingerprint,
 } from '@/runtime/style/style-fingerprint';
 import { critiqueStyle, detectAverageness } from '@/runtime/style/style-critic';
+import { postProcessAI, formatPostProcessResult } from '@/runtime/style/post-processor';
 import { normalizeUncertainties } from '@/runtime/parse-output';
 import {
   createPhaseGate,
@@ -46,6 +47,7 @@ export class WritingAgent {
   private phaseGate: PhaseGateState;
   private materialChecklist: MaterialChecklist;
   private styleFingerprint: StyleFingerprint;
+  private journalismRules: string;
 
   constructor(config: {
     belief: BeliefState;
@@ -55,9 +57,12 @@ export class WritingAgent {
     conversationContext?: string;
     /** Known facts and decisions from discovery */
     discoverySummary?: string;
+    /** Journalism-informed writing patterns */
+    journalismRules?: string;
   }) {
     this.discoveryContext = config.conversationContext || '';
     this.discoverySummary = config.discoverySummary || '';
+    this.journalismRules = config.journalismRules || '';
     this.llm = getLLM();
     const metrics: GenerationMetrics = {
       totalSections: config.outline.length,
@@ -86,6 +91,7 @@ export class WritingAgent {
       revisionHistory: [],
       readerSimulationReport: null,
       generationMetrics: metrics,
+      postProcessLog: undefined,
     };
     this.phaseGate = createPhaseGate(3);
     this.materialChecklist = createMaterialChecklist(config.belief.artifact.value || '散文');
@@ -263,14 +269,14 @@ export class WritingAgent {
       .join('\n\n');
     try {
       const resp = await this.llm.completeWithRetry({
-        systemPrompt: '你是专业写作者。生成指定章节内容。有不确定的细节在uncertainties中列出。',
+        systemPrompt: `你是专业写作者。生成指定章节内容。有不确定的细节在uncertainties中列出。${this.journalismRules ? '\n\n' + this.journalismRules : ''}`,
         prompt: promptStr,
         responseFormat: 'json',
         temperature: 0.7,
         maxTokens: 2000,
       });
       const r = (resp.json || {}) as Record<string, unknown>;
-      const content = (r.content as string) || this.fallbackContent(section);
+      let content = (r.content as string) || this.fallbackContent(section);
       const uncertainties = (r.uncertainties as WritingUncertainty[]) || [];
 
       // Quality gate: content must be meaningful
@@ -278,6 +284,13 @@ export class WritingAgent {
         if (retry) return `生成失败。请检查网络连接后 /retry 重试。`;
         // Auto-retry once
         return await this.startGeneration(true);
+      }
+
+      // Apply post-processing to strip AI patterns
+      const postResult = postProcessAI(content);
+      if (postResult.aiPatternsDetected > 0) {
+        this.state.postProcessLog = formatPostProcessResult(postResult);
+        content = postResult.text;
       }
 
       const version: SectionVersion = {
@@ -324,7 +337,7 @@ ${critique.rewriteInstructions}
 
 请重写，保持原意但更符合风格。`;
           const rewriteResp = await this.llm.completeWithRetry({
-            systemPrompt: '根据风格批评重写内容。',
+            systemPrompt: `根据风格批评重写内容。${this.journalismRules ? '\n\n' + this.journalismRules : ''}`,
             prompt: rewrittenPrompt,
             temperature: 0.5,
             maxTokens: 2000,
@@ -386,12 +399,18 @@ ${critique.rewriteInstructions}
       // Auto-retry once with simpler prompt
       try {
         const resp2 = await this.llm.completeWithRetry({
-          systemPrompt: '生成指定章节内容。',
+          systemPrompt: `生成指定章节内容。${this.journalismRules ? '\n\n' + this.journalismRules : ''}`,
           prompt: `标题: ${section.title}\n目标: ${section.goal}\n请生成内容。`,
           temperature: 0.7,
           maxTokens: 1500,
         });
-        const content = resp2.text || this.fallbackContent(section);
+        let content = resp2.text || this.fallbackContent(section);
+        // Apply post-processing to strip AI patterns
+        const postResult2 = postProcessAI(content);
+        if (postResult2.aiPatternsDetected > 0) {
+          this.state.postProcessLog = formatPostProcessResult(postResult2);
+          content = postResult2.text;
+        }
         const version: SectionVersion = {
           id: `v${Date.now().toString(36)}`,
           content,

@@ -42,6 +42,7 @@ export interface WritingAgentState {
   revisionHistory: RevisionRecord[];
   readerSimulationReport: ReaderSimulationReport | null;
   generationMetrics: GenerationMetrics;
+  postProcessLog?: string;
 }
 
 // =========================================================================
