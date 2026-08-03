@@ -42,7 +42,8 @@ import { type FieldPriority, FIELD_PRIORITY_MAP } from '@/pcs/types';
  * Values are string literals so they can be serialized for logging,
  * tracing, and inter-process communication without runtime lookup tables.
  */
-export type AgentId = 'intake' | 'clarification' | 'architect' | 'scribe' | 'review' | 'discovery';
+export type AgentId =
+  'intake' | 'clarification' | 'architect' | 'scribe' | 'review' | 'discovery' | 'orchestrator';
 
 // ===========================================================================
 // 2. Agent Request / Response

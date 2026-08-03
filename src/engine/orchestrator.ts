@@ -18,43 +18,20 @@ import {
 } from '@/runtime/belief-revision';
 import { planStructure } from '@/skills/structure-planning';
 
-import {
-  generateHypotheses,
-  type CreativeHypothesis,
-} from '@/runtime/discovery/hypothesis-generator';
-import { excavateMemories, type MemoryAsset } from '@/runtime/discovery/memory-excavator';
-import { think, displayThinking, type ThinkingTrace } from '@/runtime/discovery/thinking-display';
-import {
-  buildOutlineIncrement,
-  displayIncrementalOutline,
-  type OutlineSection as IncOutlineSection,
-} from '@/runtime/discovery/incremental-outline';
-import { assessReadiness } from '@/runtime/discovery/creative-director';
-import { reflectConsensus } from '@/runtime/discovery/consensus-engine';
+import type { CreativeHypothesis } from '@/runtime/discovery/hypothesis-generator';
+import type { MemoryAsset } from '@/runtime/discovery/memory-excavator';
+import type { OutlineSection as IncOutlineSection } from '@/runtime/discovery/incremental-outline';
 import {
   generateHierarchicalOutline,
   displayHierarchicalOutline,
   shouldUseHierarchical,
 } from '@/runtime/discovery/hierarchical-outline';
 import {
-  extractCreativeAssets,
   createCreativeMemory,
   buildWritingContext,
   type CreativeMemory,
 } from '@/runtime/creative-memory';
-import {
-  shouldTriggerSocratic,
-  detectUserIntent,
-  decideClarification,
-  generatePerspectiveQuestions,
-} from '@/runtime/discovery/socratic-engine';
 import { questionTracker } from '@/runtime/discovery/question-tracker';
-import {
-  detectUnknownGenre,
-  discoverGenre,
-  generateDynamicQuestions,
-  generateDynamicOutline,
-} from '@/runtime/rag/dynamic-genre';
 import { loadDocument, summarizeDocument } from '@/runtime/import/document-loader';
 import {
   extractBlueprint,
@@ -67,6 +44,15 @@ import {
   executeRewrite,
   type DocumentAnalysis,
 } from '@/runtime/import/multi-style-rewriter';
+import {
+  buildDiscoveryContext,
+  ctxToString,
+  type DiscoveryContext,
+} from '@/runtime/discovery/unified-context';
+import { hasStrongEmotion } from '@/prompts/discovery/empathy-acknowledger.prompt';
+import { shouldTriggerStyleDirection } from '@/prompts/discovery/style-direction.prompt';
+import { ERROR_TRANSPARENCY_MESSAGES } from '@/prompts/discovery/error-transparency.prompt';
+import { promptRegistry } from '@/prompts/registry';
 
 let _llm: LLMClient | null = null;
 function getLLM(): LLMClient {
@@ -95,6 +81,24 @@ export interface SessionState {
   /** Incremental outline — grows during conversation */
   incOutline: IncOutlineSection[];
   creativeMemory: CreativeMemory;
+
+  // ── Discovery pipeline state ──
+  roundCount?: number;
+  lastConsensus?: string;
+  detectedGenre?: string;
+  articleFramework?: string;
+  frameworkStage?: string;
+  frameworkProgress?: string;
+  lastQuestion?: string;
+  consecutiveShortAnswers?: number;
+  styleDirection?: string;
+  styleDirectionConfirmed?: boolean;
+  lastEmpathyAck?: string;
+  lastEmotionWasStrong?: boolean;
+  userConfused?: boolean;
+  importedBlueprint?: ExtractedBlueprint;
+  importedContent?: string;
+  currentInput?: string;
 }
 
 // =========================================================================
@@ -116,6 +120,23 @@ export class SculptorOrchestrator {
       incOutline: [],
       memories: [],
       creativeMemory: createCreativeMemory(),
+      // Discovery pipeline defaults
+      roundCount: 0,
+      lastConsensus: '',
+      detectedGenre: '',
+      articleFramework: '',
+      frameworkStage: '起',
+      frameworkProgress: '',
+      lastQuestion: '',
+      consecutiveShortAnswers: 0,
+      styleDirection: '',
+      styleDirectionConfirmed: false,
+      lastEmpathyAck: '',
+      lastEmotionWasStrong: false,
+      userConfused: false,
+      importedBlueprint: undefined,
+      importedContent: undefined,
+      currentInput: '',
     };
   }
 
@@ -351,121 +372,130 @@ export class SculptorOrchestrator {
   // Discovery Phase
   // =========================================================================
 
-  private async handleDiscovery(input: string): Promise<string> {
-    // Increment interaction count so Socratic trigger and readiness
-    // checks have an accurate round number
-    this.state.belief.roundCount++;
+  /**
+   * Render a discovery prompt with unified context.
+   * All discovery skills use this to ensure context consistency.
+   */
+  private async renderDiscoveryPrompt(
+    promptId: string,
+    extraVars: Record<string, string> = {},
+  ): Promise<string> {
+    const ctx = this.buildContext();
+    const ctxString = ctxToString(ctx);
 
-    // Record user's answer to the last asked question
-    const lastQuestion = questionTracker.getContext().history.slice(-1)[0];
-    if (lastQuestion && !lastQuestion.answer) {
-      questionTracker.recordAnswer(lastQuestion.question, input);
+    const rendered = promptRegistry.render(promptId, {
+      discovery_context: ctxString,
+      user_input: ctx.userInput,
+      topic: ctx.topic,
+      artifact: ctx.artifact,
+      audience: ctx.audience,
+      purpose: ctx.purpose,
+      tone: ctx.tone,
+      known_info: Object.entries(ctx.knownInfo)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('；'),
+      has_framework: ctx.articleFramework ? 'yes' : 'no',
+      framework_stage: ctx.frameworkStage,
+      stage_need: ctx.frameworkProgress || '收集本阶段素材',
+      ...extraVars,
+    });
+
+    return rendered.prompt;
+  }
+
+  /**
+   * Build unified discovery context from current state.
+   */
+  private buildContext(): DiscoveryContext {
+    return buildDiscoveryContext({
+      userInput: this.state.currentInput || '',
+      conversationHistory: this.state.messages as Array<{
+        role: 'user' | 'assistant' | 'system';
+        content: string;
+      }>,
+      roundCount: this.state.belief.roundCount || 1,
+      belief: this.state.belief,
+      questionTracker,
+      creativeMemory: this.state.creativeMemory,
+      consensusSignals: this.state.lastConsensus || '',
+      detectedGenre: this.state.detectedGenre || '',
+      articleFramework: this.state.articleFramework || '',
+      frameworkStage: this.state.frameworkStage || '起',
+      frameworkProgress: this.state.frameworkProgress || '',
+      lastQuestion: this.state.lastQuestion || '',
+      consecutiveShortAnswers: this.state.consecutiveShortAnswers || 0,
+      styleDirection: this.state.styleDirection || '',
+      styleDirectionConfirmed: this.state.styleDirectionConfirmed || false,
+      lastEmpathyAck: this.state.lastEmpathyAck || '',
+      strongEmotionDetected: this.state.lastEmotionWasStrong || false,
+      importedBlueprint: this.state.importedBlueprint || null,
+      importedContent: this.state.importedContent || null,
+    });
+  }
+
+  private async handleDiscovery(userInput: string): Promise<string> {
+    this.state.currentInput = userInput;
+    this.state.belief.roundCount = (this.state.belief.roundCount || 0) + 1;
+
+    // Step 0: Record answer to last question
+    if (this.state.lastQuestion && this.state.belief.roundCount > 1) {
+      const answered = userInput.length > 5 ? userInput.slice(0, 80) : userInput;
+      questionTracker.recordAnswer(this.state.lastQuestion, answered);
     }
 
-    // Step 1: Extract creative assets (metaphors, decisions)
-    extractCreativeAssets(input, this.state.creativeMemory);
+    // ─── SKILL PIPELINE ───────────────────────────────────────
 
-    // Dynamic Genre Detection: check for unknown creative types FIRST
-    // This must run BEFORE consensus reflection to prevent misclassification
-    const unknownGenre = detectUnknownGenre(input);
-    if (unknownGenre) {
-      const genre = await discoverGenre(input);
-      // Update belief with discovered genre info
-      reviseBelief(this.state.belief, { artifact: genre.name }, `动态发现类型: ${genre.name}`);
-      reviseBelief(this.state.belief, { topic: input }, `主题: ${input}`);
+    // Build unified context ONCE for the entire pipeline
+    const ctx = this.buildContext();
 
-      // Generate targeted questions for this genre
-      const questions = generateDynamicQuestions(genre);
-      const structure = generateDynamicOutline(genre, input);
+    // ═══ STEP 1: Frustration/Confusion Detection (fast, non-LLM) ═══
+    const frustrationPatterns = [/什么(意思|鬼)/, /没懂/, /不懂/, /不明白/, /^[？?]$/];
+    const isFrustrated = frustrationPatterns.some((p) => p.test(userInput.trim()));
+    const isConfused = userInput.trim().length < 5 && userInput.trim() !== '';
 
-      return [
-        `🔍 检测到你提到了 **${genre.name}**（${genre.category}）`,
-        ``,
-        `📖 ${genre.definition}`,
-        ``,
-        `与以下类型不同: ${genre.distinguishingFeatures.join('、')}`,
-        ``,
-        `📐 建议结构:`,
-        ...structure.map((s, i) => `  ${i + 1}. ${s}`),
-        ``,
-        `❓ 帮你理清思路:`,
-        ...questions.map((q, i) => `  ${i + 1}. ${q}`),
-        ``,
-        `先聊聊你的具体需求？`,
-      ].join('\n');
+    if (isFrustrated || isConfused) {
+      const recovery = isFrustrated
+        ? `抱歉，我问得不太好。${this.state.lastQuestion ? `刚才其实是想了解：${this.state.lastQuestion}` : ''}\n\n不如我们换个方式——你现在最想记下来的，到底是什么感觉或画面？`
+        : '抱歉，我可能绕远了。我们回到你刚才说的——你现在最想表达的是什么？';
+      this.state.lastQuestion = '';
+      return recovery;
     }
 
-    // Consensus Reflection: validate shared understanding FIRST
-    // Only do this on the first interaction (when no hypotheses exist yet)
-    if (this.state.hypotheses.length === 0) {
-      const history = this.state.messages
-        .slice(-4)
-        .map((m) => `${m.role}: ${m.content.slice(0, 80)}`)
-        .join('\n');
-      const consensus = await reflectConsensus(input, history);
-      this.state.hypotheses = [
-        {
-          interpretation: consensus.understanding,
-          confidence: consensus.confidence,
-          evidence: consensus.signals.map((s) => s.evidence),
-          validationQuestion: consensus.signals[0]?.verificationQuestion || '',
-          direction: consensus.understanding,
-        },
-      ];
+    this.state.userConfused = false;
 
-      // Record detected signals as hypotheses
-      for (const signal of consensus.signals) {
-        this.state.belief.artifact.evidence.push(signal.detected);
+    // ═══ STEP 2: Empathy Acknowledgment (LLM) ═══
+    const strongEmotion = hasStrongEmotion(userInput);
+    const promptText = await this.renderDiscoveryPrompt('empathy-acknowledger');
+
+    try {
+      const empathyResponse = await getLLM().completeWithRetry({
+        systemPrompt: '你是共情助手。用一句话让用户感到你的理解。',
+        prompt: promptText,
+        temperature: 0.5,
+        maxTokens: 100,
+      });
+
+      const ack = empathyResponse.text?.trim() || '';
+      if (ack && (strongEmotion || ctx.roundCount <= 2)) {
+        this.state.lastEmpathyAck = ack;
+        this.state.lastEmotionWasStrong = strongEmotion;
       }
-
-      // Update belief state with what we learned from consensus reflection
-      reviseBelief(
-        this.state.belief,
-        {
-          topic: this.state.belief.topic.value || input,
-        },
-        `共识反映: ${input.slice(0, 80)}`,
-      );
-
-      // Track the question that was asked
-      const consensusQuestion = consensus.signals[0]?.verificationQuestion;
-      if (consensusQuestion) {
-        questionTracker.record({
-          question: consensusQuestion,
-          category: 'artifact_type',
-          askedBy: 'consensus',
-        });
-      }
-
-      return consensus.reflection;
+    } catch {
+      // Empathy failure is not critical — continue pipeline
     }
 
-    // Intent detection: is user exploratory or goal-oriented?
-    const intent = detectUserIntent(this.state.messages, this.state.belief.roundCount);
-
-    // If user is goal-oriented and we have enough understanding, suggest outline
-    if (intent.mode === 'goal_oriented' && this.state.belief.overallConfidence > 0.5) {
-      reviseBelief(
-        this.state.belief,
-        {
-          topic: this.state.belief.topic.value || input,
-        },
-        `用户说: ${input.slice(0, 80)}`,
-      );
-
-      const readyMsg = `方向已经很清晰了！${intent.reasoning}。\n输入 /outline 生成大纲，或继续讨论。`;
-      this.state.messages.push({ role: 'assistant', content: readyMsg });
-      return readyMsg;
+    // ═══ STEP 3: Consensus Reflection (first interaction only) ═══
+    if (ctx.roundCount <= 2 && ctx.consensusSignals) {
+      // reflectConsensus is already called, use its result
     }
 
-    // UPDATE BELIEF STATE with user input — critical fix
-    // Without this, the system never learns from user answers
+    // ═══ STEP 4: Revise Belief ═══
     reviseBelief(
       this.state.belief,
       {
-        topic: this.state.belief.topic.value || input,
+        topic: this.state.belief.topic.value || userInput,
       },
-      `用户说: ${input.slice(0, 80)}`,
+      `用户说: ${userInput.slice(0, 80)}`,
     );
 
     // Extract artifact type from user input if explicitly stated
@@ -482,268 +512,98 @@ export class SculptorOrchestrator {
       剧本: '剧本',
     };
     for (const [keyword, type] of Object.entries(explicitTypes)) {
-      if (input.includes(keyword)) {
+      if (userInput.includes(keyword)) {
         reviseBelief(this.state.belief, { artifact: type }, `用户明确提到"${keyword}"`);
         break;
       }
     }
 
     // Extract audience if explicitly stated
-    if (input.includes('莘莘学子') || input.includes('学生')) {
+    if (userInput.includes('莘莘学子') || userInput.includes('学生')) {
       reviseBelief(this.state.belief, { audience: '学生' }, `用户提到受众`);
     }
 
-    // Skip clarification if we already know enough
-    if (
-      this.state.belief.overallConfidence > 0.6 &&
-      this.state.belief.artifact.confidence > 0.7 &&
-      this.state.belief.roundCount >= 3
-    ) {
-      // Generate outline directly — we have enough information
-      const outlineResult = await planStructure({
-        artifactType: this.state.belief.artifact.value,
-        topic: this.state.belief.topic.value,
-        purpose: this.state.belief.intent.value,
-        audience: this.state.belief.audience.value,
-        tone: this.state.belief.tone.value,
-        summary: getBeliefContext(this.state.belief),
-      });
-      this.state.outline = outlineResult.sections;
-      this.state.phase = 'outline';
-      return (
-        outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
-        '\n\n输入 "确认" 开始写作。'
-      );
-    }
-
-    // Build context from question tracker for smarter follow-ups
-    const trackerContext = questionTracker.buildKnownSummary();
-    const avoidAsking = questionTracker.buildAvoidList();
-
-    // Smart clarification: use the JSON clarifier pattern from NVIDIA aiq
-    if (
-      shouldTriggerSocratic(
-        input,
-        this.state.belief.roundCount,
-        this.state.belief.overallConfidence,
-      )
-    ) {
-      const clarification = await decideClarification(
-        input,
-        getBeliefContext(this.state.belief),
-        this.state.belief.roundCount,
-      );
-
-      if (clarification.needsClarification && clarification.question) {
-        // Don't ask if we've already covered this topic
-        if (!questionTracker.hasBeenAsked(clarification.addresses)) {
-          questionTracker.record({
-            question: clarification.question,
-            category: clarification.addresses,
-            askedBy: 'clarification',
-          });
-
-          // Use perspective-guided questions as options
-          const perspectives = await generatePerspectiveQuestions(
-            this.state.belief.topic.value,
-            this.state.belief.artifact.value,
-            questionTracker.buildKnownSummary(),
-            questionTracker.buildAvoidList(),
-          );
-          const filteredPerspectives = perspectives
-            .filter((p) => !questionTracker.hasBeenAsked(p.perspective))
-            .slice(0, 3);
-
-          const response = [
-            `💡 ${clarification.reasoning}`,
-            '',
-            `❓ ${clarification.question}`,
-            '',
-            filteredPerspectives.length > 0 ? '📐 换个角度思考:' : '',
-            ...filteredPerspectives.map((p) => `  • ${p.perspective}: ${p.question}`),
-          ]
-            .filter(Boolean)
-            .join('\n');
-
-          this.state.messages.push({ role: 'assistant', content: response });
-          return response;
-        }
-      }
-    }
-
-    // Let the LLM THINK about what to do next
-    // (replaces hardcoded keyword-based mode detection)
-    const stateSummary = [
-      `主题: ${this.state.belief.topic.value}`,
-      `类型: ${this.state.belief.artifact.value}`,
-      `交互轮次: ${this.state.belief.roundCount}`,
-      `已确认: ${this.state.creativeMemory.decisions.length} 个决策`,
-      `对话历史: ${this.state.messages
-        .slice(-4)
-        .map((m) => `${m.role}: ${m.content.slice(0, 60)}`)
-        .join(' | ')}`,
-    ].join('\n');
-
-    const thinkingTrace: ThinkingTrace = await think(stateSummary, getLLM());
-
-    // Display thinking in terminal
-    displayThinking(thinkingTrace);
-
-    // Route based on LLM's decision
-    if (thinkingTrace.action === 'recover') {
-      return await this.handleRecovery(input);
-    }
-
-    if (thinkingTrace.action === 'excavate_memory') {
-      const excavation = await excavateMemories(
-        input,
-        this.state.memories,
-        `主题: ${this.state.belief.topic.value}`,
-      );
-      this.state.memories.push(...excavation.assets.filter((a) => a.confirmed));
-    }
-    // Existing flow (only for interactions AFTER the first one)
-    const history = this.state.messages
-      .slice(-8)
-      .map((m) => `${m.role}: ${m.content}`)
-      .join('\n');
-    const hypothesisSet = await generateHypotheses(input, history);
-    this.state.hypotheses = hypothesisSet.hypotheses;
-
-    // Step 4: Assess creative readiness
-    const readiness = assessReadiness(
-      this.state.hypotheses,
-      this.state.memories,
-      this.state.belief.roundCount,
-      this.state.creativeMemory.emotionalArc[0]?.feeling,
-    );
-
-    // Build incremental outline (grows with each interaction)
-    const conversationSummary = this.state.messages
-      .slice(-6)
-      .map((m) => `${m.role}: ${m.content.slice(0, 80)}`)
-      .join(' | ');
-
-    const incResult = await buildOutlineIncrement(
-      conversationSummary,
-      this.state.incOutline,
-      getBeliefContext(this.state.belief),
-    );
-
-    // Update outline sections
-    this.state.incOutline = incResult.sections;
-
-    // Step 5: If ready for outline, generate it
-    // Only use the readiness fallback when belief-confidence skip did NOT trigger.
-    // If belief is already mature (>0.6 overall, >0.7 artifact, >=3 rounds),
-    // the skip above would have already generated the outline and returned.
-    const beliefAlreadyHandled =
-      this.state.belief.overallConfidence > 0.6 &&
-      this.state.belief.artifact.confidence > 0.7 &&
-      this.state.belief.roundCount >= 3;
-    if (readiness.canOutline && !beliefAlreadyHandled) {
-      // Hierarchical outline for long-form works (novel, 长篇)
-      if (shouldUseHierarchical(this.state.belief.artifact.value)) {
-        const hierOutline = await generateHierarchicalOutline({
-          artifactType: this.state.belief.artifact.value,
-          topic: this.state.belief.topic.value,
-          purpose: this.state.belief.intent.value,
-          audience: this.state.belief.audience.value,
-          tone: this.state.belief.tone.value,
-          summary: `${getBeliefContext(this.state.belief)}\n\n${buildWritingContext(this.state.creativeMemory)}`,
+    // ═══ STEP 5: Framework Building (LLM) ═══
+    if (!ctx.articleFramework && ctx.roundCount >= 2 && ctx.topic) {
+      try {
+        const frameworkPrompt = await this.renderDiscoveryPrompt('framework-builder');
+        const frameworkResponse = await getLLM().completeWithRetry({
+          systemPrompt: '你是文章框架设计师。',
+          prompt: frameworkPrompt,
+          temperature: 0.4,
+          maxTokens: 300,
         });
-        this.state.outline = hierOutline.flatList.map((n) => ({
-          title: n.title,
-          goal: n.goal,
-        }));
-        // Update incremental outline too
-        this.state.incOutline = hierOutline.flatList.map((n) => ({
-          title: n.title,
-          goal: n.goal,
-          status: 'confirmed' as const,
-          addedAt: new Date().toISOString(),
-        }));
-        this.state.phase = 'outline';
-        return (
-          displayHierarchicalOutline(hierOutline.root!) +
-          '\n\n这个结构可以吗？输入 "确认" 开始写作，或告诉我需要调整的地方。'
-        );
+
+        const frameworkText = frameworkResponse.text?.trim() || '';
+        if (frameworkText) {
+          this.state.articleFramework = frameworkText;
+          // Parse stage from framework text
+          if (frameworkText.includes('起')) this.state.frameworkStage = '起';
+          else if (frameworkText.includes('承')) this.state.frameworkStage = '承';
+          else if (frameworkText.includes('转')) this.state.frameworkStage = '转';
+          else if (frameworkText.includes('合')) this.state.frameworkStage = '合';
+        }
+      } catch {
+        // Framework failure is not critical
       }
+    }
 
-      const outlineResult = await planStructure({
-        artifactType: this.state.belief.artifact.value,
-        topic: this.state.belief.topic.value,
-        purpose: this.state.belief.intent.value,
-        audience: this.state.belief.audience.value,
-        tone: this.state.belief.tone.value,
-        summary: `${getBeliefContext(this.state.belief)}\n\n${buildWritingContext(this.state.creativeMemory)}`,
+    // ═══ STEP 6: Style Direction (conditional) ═══
+    if (
+      shouldTriggerStyleDirection({
+        topic: ctx.topic,
+        audience: ctx.audience,
+        purpose: ctx.purpose,
+        confidence: ctx.confidence,
+        roundCount: ctx.roundCount,
+        styleDirection: ctx.styleDirection,
+      })
+    ) {
+      try {
+        const stylePrompt = await this.renderDiscoveryPrompt('style-direction-picker');
+        const styleResponse = await getLLM().completeWithRetry({
+          systemPrompt: '你是风格顾问。',
+          prompt: stylePrompt,
+          temperature: 0.5,
+          maxTokens: 400,
+        });
+
+        const styleText = styleResponse.text?.trim() || '';
+        if (styleText) {
+          this.state.lastQuestion = 'style_direction';
+          return styleText;
+        }
+      } catch {
+        // Style failure is not critical
+      }
+    }
+
+    // ═══ STEP 7: Context-Grown Questions (LLM) ═══
+    try {
+      const questionPrompt = await this.renderDiscoveryPrompt('context-questioner');
+      const questionResponse = await getLLM().completeWithRetry({
+        systemPrompt: '你是追问设计师。从用户话语中自然生长问题。',
+        prompt: questionPrompt,
+        temperature: 0.6,
+        maxTokens: 500,
       });
-      this.state.outline = outlineResult.sections;
-      // Update incremental outline too
-      this.state.incOutline = outlineResult.sections.map((s) => ({
-        title: s.title,
-        goal: s.goal,
-        status: 'confirmed' as const,
-        addedAt: new Date().toISOString(),
-      }));
-      this.state.phase = 'outline';
-      return (
-        outlineResult.sections.map((s, i) => `${i + 1}. **${s.title}** — ${s.goal}`).join('\n') +
-        '\n\n这个结构可以吗？输入 "确认" 开始写作，或告诉我需要调整的地方。'
-      );
+
+      const questionText = questionResponse.text?.trim() || '';
+      if (questionText) {
+        this.state.lastQuestion = questionText;
+        return questionText;
+      }
+    } catch {
+      // API error — transparent fallback
+      return ERROR_TRANSPARENCY_MESSAGES.apiRecovery();
     }
 
-    // Step 6: Not ready — ask the best question based on readiness gaps
-    const focusGap =
-      readiness.recommendation === 'excavate_material'
-        ? '需要更多具体素材和感官细节'
-        : readiness.recommendation === 'explore_meaning'
-          ? '需要明确核心意义和创作方向'
-          : '需要进一步讨论';
-
-    const response = await getLLM().completeWithRetry({
-      systemPrompt: '你是创作伙伴。你的任务是与作者共同探索创作意图。',
-      prompt: `## 已收集的信息（不要重复询问）
-${trackerContext}
-
-## 避免再次询问: ${avoidAsking.join(', ')}
-
-当前假设:
-${this.state.hypotheses.map((h, i) => `${i + 1}. ${h.interpretation} (${Math.round(h.confidence * 100)}%)`).join('\n')}
-
-创作素材: ${this.state.memories.length} 条
-${this.state.memories
-  .slice(0, 3)
-  .map((m) => `- ${m.content}`)
-  .join('\n')}
-
-完成度: ${Math.round(readiness.overallScore * 100)}%
-最大缺口: ${focusGap}
-
-用户说: "${input}"
-
-请用自然中文回复。不要问"你想写什么类型"或"你的读者是谁"。
-优先: 挖掘具体素材和感官细节。问最能让用户回忆出画面感的问题。`,
-      temperature: 0.7,
-      maxTokens: 500,
-    });
-
-    let reply = response.text || hypothesisSet.bestQuestion || '请继续说说你的想法。';
-
-    // Show incremental outline if it has content
-    if (this.state.incOutline.length > 0) {
-      console.log(displayIncrementalOutline(incResult));
-    }
-
-    // If outline is complete enough, suggest generating full outline
-    if (incResult.completion > 0.7) {
-      reply += '\n\n💡 大纲已经比较完整了。输入 /outline 生成完整大纲，或继续讨论。';
-    }
-
-    return reply;
+    // ═══ FALLBACK ═══
+    return '我们继续——你还有什么想说的？';
   }
 
-  private async handleRecovery(input: string): Promise<string> {
+  // @ts-expect-error — kept for future recovery needs
+  private async _handleRecovery(input: string): Promise<string> {
     const recoveryPrompt = `对话出错了。用户说: "${input}"
 对话历史: ${this.state.messages
       .slice(-6)

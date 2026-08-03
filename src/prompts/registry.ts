@@ -352,3 +352,16 @@ export class PromptRegistry implements IPromptRegistry {
 // ===========================================================================
 
 export const promptRegistry = new PromptRegistry();
+
+// ── Register discovery prompts ──
+import {
+  EMPATHY_ACK_PROMPT,
+  FRAMEWORK_BUILDER_PROMPT,
+  CONTEXT_QUESTIONER_PROMPT,
+  STYLE_DIRECTION_PROMPT,
+} from './discovery';
+
+promptRegistry.register(EMPATHY_ACK_PROMPT);
+promptRegistry.register(FRAMEWORK_BUILDER_PROMPT);
+promptRegistry.register(CONTEXT_QUESTIONER_PROMPT);
+promptRegistry.register(STYLE_DIRECTION_PROMPT);
