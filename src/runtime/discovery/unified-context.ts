@@ -65,6 +65,9 @@ export interface DiscoveryContext {
   styleContext: string; // Formatted style context for prompts
   styleConfidence: number; // Current style prediction confidence
 
+  // ── Style Profile for Question Generation ──
+  styleProfile: string; // Formatted style profile for LLM prompts
+
   // ── Import (if any) ──
   importedBlueprint: ExtractedBlueprint | null;
   importedContent: string | null;
@@ -96,6 +99,7 @@ export function buildDiscoveryContext(params: {
   importedContent?: string | null;
   styleContext?: string;
   styleConfidence?: number;
+  styleProfile?: string;
 }): DiscoveryContext {
   // Build belief summary
   const beliefParts: string[] = [];
@@ -156,6 +160,7 @@ export function buildDiscoveryContext(params: {
     strongEmotionDetected: params.strongEmotionDetected || false,
     styleContext: params.styleContext || '',
     styleConfidence: params.styleConfidence || 0,
+    styleProfile: params.styleProfile || '',
     importedBlueprint: params.importedBlueprint || null,
     importedContent: params.importedContent || null,
   };
@@ -193,6 +198,10 @@ export function ctxToString(ctx: DiscoveryContext): string {
 
   if (ctx.styleDirection) {
     parts.push(`\n【风格方向】${ctx.styleDirection}`);
+  }
+
+  if (ctx.styleProfile) {
+    parts.push(`\n【风格感知】${ctx.styleProfile}`);
   }
 
   parts.push(`\n【对话轮次】第${ctx.roundCount}轮`);

@@ -26,6 +26,16 @@ export const CONTEXT_QUESTIONER_PROMPT: PromptTemplate = {
 **用户刚说**
 "{{user_input}}"
 
+【用户风格档案】
+{{style_profile}}
+
+风格感知规则：
+- 如果用户偏好短句→选项用短句表述
+- 如果用户偏好具体意象→选项包含具体意象词汇
+- 如果用户语气冷峻→选项用克制含蓄的语言
+- 如果用户语言文白夹杂→选项适当融入文言虚词
+- 选项的措辞风格应与用户风格档案一致，而非中性化
+
 **框架当前阶段**: {{framework_stage}}
 **本阶段需要收集**: {{stage_need}}
 
@@ -62,7 +72,14 @@ C. [选项C——第三个角度]
   A. 你想让他们通过你的文章了解红楼的什么？——历史事实还是你的个人感受？
   B. 你希望他们读完后的第一反应是什么？——了解更多历史，还是被你打动？
   C. 你想象老师在课上念你的文章——你最想让老师读到哪一段？`,
-  variables: ['discovery_context', 'user_input', 'framework_stage', 'stage_need', 'style_context'],
+  variables: [
+    'discovery_context',
+    'user_input',
+    'framework_stage',
+    'stage_need',
+    'style_context',
+    'style_profile',
+  ],
   systemPrompt: '你是追问设计师。从用户话语中自然生长问题。提供选项而非开放式提问。',
   maxTokens: 500,
 };

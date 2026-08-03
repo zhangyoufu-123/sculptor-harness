@@ -475,6 +475,17 @@ export class SculptorOrchestrator {
     const ctx = this.buildContext();
     const ctxString = ctxToString(ctx);
 
+    const styleSnapshot = styleVectorStore.getSnapshot();
+    const styleProfile = this.state.styleProfile
+      ? `关注焦点: ${styleSnapshot.topAttentionTargets
+          .slice(0, 5)
+          .map((t) => t.target)
+          .join('、')}\n写作手法: ${styleSnapshot.topTechniques
+          .slice(0, 3)
+          .map((t) => t.technique)
+          .join('、')}\n置信度: ${(styleSnapshot.confidence * 100).toFixed(0)}%`
+      : '尚未学习用户风格';
+
     const rendered = promptRegistry.render(promptId, {
       discovery_context: ctxString,
       user_input: ctx.userInput,
@@ -490,6 +501,7 @@ export class SculptorOrchestrator {
       framework_stage: ctx.frameworkStage,
       stage_need: ctx.frameworkProgress || '收集本阶段素材',
       style_context: ctx.styleContext ? `\n【风格学习】${ctx.styleContext}` : '',
+      style_profile: styleProfile,
       ...extraVars,
     });
 
@@ -622,6 +634,85 @@ export class SculptorOrchestrator {
       },
       `用户说: ${userInput.slice(0, 80)}`,
     );
+
+    // ═══ STEP 4.5: Extract style signals from answer ═══
+    // User's answer text contains implicit style information.
+    // Analyze it to enrich the style vector without asking explicit style questions.
+    if (userInput.length > 20 && styleVectorStore.getSnapshot().totalChoices < 50) {
+      try {
+        const stylePrompt = this.buildStyleExtractionPrompt(userInput);
+        const styleResponse = await getLLM().completeWithRetry({
+          systemPrompt:
+            '从文本中提取风格信号。输出JSON：{"techniques":[],"imagery":[],"toneKeywords":[],"vocabularyHighlights":[]}',
+          prompt: stylePrompt,
+          responseFormat: 'json',
+          temperature: 0.3,
+          maxTokens: 300,
+        });
+
+        if (styleResponse.json) {
+          const sig = styleResponse.json as {
+            techniques?: string[];
+            imagery?: string[];
+            toneKeywords?: string[];
+            vocabularyHighlights?: string[];
+          };
+
+          const feedbacks: Array<{
+            dimension: 1 | 2 | 3;
+            feature: string;
+            correction: number;
+            reason: string;
+          }> = [];
+
+          // Techniques → D1
+          for (const t of (sig.techniques || []).slice(0, 3)) {
+            feedbacks.push({
+              dimension: 1,
+              feature: `技法:${t}`,
+              correction: 0.3,
+              reason: `回答中检测到技法: ${t}`,
+            });
+          }
+
+          // Imagery → D3
+          for (const img of (sig.imagery || []).slice(0, 3)) {
+            feedbacks.push({
+              dimension: 3,
+              feature: img,
+              correction: 0.3,
+              reason: `回答中检测到意象: ${img}`,
+            });
+          }
+
+          // Tone keywords → D1
+          for (const tk of (sig.toneKeywords || []).slice(0, 3)) {
+            feedbacks.push({
+              dimension: 1,
+              feature: `语气:${tk}`,
+              correction: 0.2,
+              reason: `回答语气: ${tk}`,
+            });
+          }
+
+          // Vocabulary → D3
+          for (const vh of (sig.vocabularyHighlights || []).slice(0, 5)) {
+            feedbacks.push({
+              dimension: 3,
+              feature: vh,
+              correction: 0.25,
+              reason: `特色词汇: ${vh}`,
+            });
+          }
+
+          if (feedbacks.length > 0) {
+            styleVectorStore.applyFeedbackBatch(feedbacks);
+          }
+        }
+      } catch {
+        // Non-blocking: style extraction from answers is optional
+      }
+    }
 
     // Extract artifact type from user input if explicitly stated
     const explicitTypes: Record<string, string> = {
@@ -1035,5 +1126,19 @@ export class SculptorOrchestrator {
     }
     const union = tokensA.length + tokensB.size - intersection;
     return union > 0 ? intersection / union : 0;
+  }
+
+  private buildStyleExtractionPrompt(userAnswer: string): string {
+    return `分析以下用户回答，提取隐含的风格信号：
+
+"${userAnswer.slice(0, 500)}"
+
+提取：
+1. 修辞手法（如比喻、排比、反问、白描等）
+2. 意象类型（如自然、社会、抽象、身体感知、日常物品等）
+3. 语气关键词（如冷静、热烈、讽刺、怀旧、克制等）
+4. 特色词汇（有个人特色的实词，不是常见虚词）
+
+输出JSON。如果没有检测到某项，返回空数组。`;
   }
 }
