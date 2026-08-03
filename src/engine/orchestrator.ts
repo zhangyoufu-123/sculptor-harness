@@ -10,11 +10,7 @@
 
 // Agent Cluster
 import { agentBus, ensureAgentsActive, type AgentRole } from '@/agents/cluster';
-import {
-  predictUserChoices,
-  recordUserChoice,
-  formatStyleContext,
-} from '@/runtime/style/style-predictor';
+import { predictUserChoices, formatStyleContext } from '@/runtime/style/style-predictor';
 import { styleOnboarding, looksLikePastedText } from '@/runtime/style/style-onboarding';
 import { extractStyle } from '@/runtime/style/style-extractor';
 import { styleVectorStore } from '@/runtime/style/style-vector-store';
@@ -556,6 +552,8 @@ export class SculptorOrchestrator {
           this.state.lastPrediction.options,
         );
         if (chosenOption !== undefined) {
+          const chosenText = this.state.lastPrediction.options[chosenOption] || '';
+
           agentBus.emit({
             type: 'user_choice_made',
             source: 'question_agent' as AgentRole,
@@ -563,18 +561,80 @@ export class SculptorOrchestrator {
               question: this.state.lastPrediction.question,
               options: this.state.lastPrediction.options,
               chosenIndex: chosenOption,
+              chosenText,
               predictedProbs: this.state.lastPrediction.predictedProbs,
             },
             priority: 'high',
           });
 
-          // Record for style learning
-          recordUserChoice(
-            this.state.lastPrediction.question,
-            this.state.lastPrediction.options,
-            chosenOption,
-            this.state.lastPrediction.predictedProbs,
-          );
+          // Extract style signals from the chosen option TEXT
+          // e.g., user chose "那个细节让你停了下来" → the phrasing IS style data
+          if (chosenText.length > 5) {
+            try {
+              const sigPrompt = this.buildStyleExtractionPrompt(chosenText);
+              const sigResponse = await getLLM().completeWithRetry({
+                systemPrompt:
+                  '从文本中提取风格信号。输出JSON：{"techniques":[],"imagery":[],"toneKeywords":[],"vocabularyHighlights":[]}',
+                prompt: sigPrompt,
+                responseFormat: 'json',
+                temperature: 0.3,
+                maxTokens: 300,
+              });
+
+              if (sigResponse.json) {
+                const sig = sigResponse.json as {
+                  techniques?: string[];
+                  imagery?: string[];
+                  toneKeywords?: string[];
+                  vocabularyHighlights?: string[];
+                };
+
+                const feedbacks: Array<{
+                  dimension: 1 | 2 | 3;
+                  feature: string;
+                  correction: number;
+                  reason: string;
+                }> = [];
+                for (const t of (sig.techniques || []).slice(0, 3)) {
+                  feedbacks.push({
+                    dimension: 1,
+                    feature: `选项技法:${t}`,
+                    correction: 0.4,
+                    reason: `用户选择→技法: ${t}`,
+                  });
+                }
+                for (const img of (sig.imagery || []).slice(0, 3)) {
+                  feedbacks.push({
+                    dimension: 3,
+                    feature: img,
+                    correction: 0.35,
+                    reason: `用户选择→意象: ${img}`,
+                  });
+                }
+                for (const tk of (sig.toneKeywords || []).slice(0, 3)) {
+                  feedbacks.push({
+                    dimension: 1,
+                    feature: `选项语气:${tk}`,
+                    correction: 0.3,
+                    reason: `用户选择→语气: ${tk}`,
+                  });
+                }
+                for (const vh of (sig.vocabularyHighlights || []).slice(0, 5)) {
+                  feedbacks.push({
+                    dimension: 3,
+                    feature: vh,
+                    correction: 0.3,
+                    reason: `用户选择→词汇: ${vh}`,
+                  });
+                }
+                if (feedbacks.length > 0) {
+                  styleVectorStore.applyFeedbackBatch(feedbacks);
+                }
+              }
+            } catch {
+              // Non-blocking: option text extraction is enhancement, not critical
+            }
+          }
         }
         this.state.lastPrediction = undefined;
       }
