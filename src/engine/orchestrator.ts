@@ -821,6 +821,33 @@ export class SculptorOrchestrator {
       reviseBelief(this.state.belief, { audience: '学生' }, `用户提到受众`);
     }
 
+    // ═══ STEP 4.6: Framework Stage Advancement ═══════════════
+    // Check if current stage has enough material to advance
+    if (this.state.articleFramework && this.state.frameworkStage) {
+      const stageNeedsMore = await this.checkStageCompletion(
+        userInput,
+        this.state.frameworkStage,
+        ctx.conversationHistory.map((m) => `${m.role}: ${m.content}`).join('\n'),
+      );
+
+      if (!stageNeedsMore && this.state.frameworkStage !== '合') {
+        // Advance to next stage
+        const stages = ['起', '承', '转', '合'];
+        const currentIdx = stages.indexOf(this.state.frameworkStage);
+        if (currentIdx >= 0 && currentIdx < stages.length - 1) {
+          const prev = this.state.frameworkStage;
+          this.state.frameworkStage = stages[currentIdx + 1];
+          this.state.frameworkProgress = `阶段已从"${prev}"推进到"${this.state.frameworkStage}"，现在需要收集${
+            this.state.frameworkStage === '承'
+              ? '事件发展'
+              : this.state.frameworkStage === '转'
+                ? '情感高潮'
+                : '结尾收束'
+          }的素材`;
+        }
+      }
+    }
+
     // ═══ STEP 5: Framework Building (LLM) ═══
     if (!ctx.articleFramework && ctx.roundCount >= 2 && ctx.topic) {
       try {
@@ -1248,5 +1275,34 @@ export class SculptorOrchestrator {
 4. 特色词汇（有个人特色的实词，不是常见虚词）
 
 输出JSON。如果没有检测到某项，返回空数组。`;
+  }
+
+  /**
+   * Check if the current framework stage has enough material.
+   * Uses LLM to evaluate completion. Returns true if MORE is needed.
+   */
+  private async checkStageCompletion(
+    lastInput: string,
+    currentStage: string,
+    history: string,
+  ): Promise<boolean> {
+    try {
+      const llm = new LLMClient();
+      const response = await llm.completeWithRetry({
+        systemPrompt:
+          '你判断框架阶段是否完成。输出JSON：{"needsMore": true/false, "reason": "..."}',
+        prompt: `文章框架当前处于"${currentStage}"阶段。\n\n对话历史:\n${history.slice(-2000)}\n\n用户刚说: "${lastInput}"\n\n当前阶段"${currentStage}"是否还需要更多素材？如果用户已经提供了3个以上该阶段的具体内容，返回needsMore: false。否则true。`,
+        responseFormat: 'json',
+        temperature: 0.2,
+        maxTokens: 150,
+      });
+
+      if (response.json) {
+        return (response.json as { needsMore: boolean }).needsMore ?? true;
+      }
+    } catch {
+      // Default: assume more is needed (stay in current stage)
+    }
+    return true;
   }
 }
