@@ -106,15 +106,64 @@ export async function extractStyle(
       const prompt = buildExtractionPrompt(textSample, compSummary);
 
       const response = await llm.completeWithRetry({
-        systemPrompt: '你是文学风格分析师。从14个维度提取作者风格特征。输出纯JSON。',
-        prompt,
+        systemPrompt:
+          '你只输出一个JSON对象，每个字段的值必须是0.0到1.0之间的数字。不要输出任何文字描述，不要用字符串代替数字。如果你不确定某个值，就填0.5。',
+        prompt:
+          prompt +
+          '\n\n🔴 重要：每个维度的值必须是数字（0.0到1.0之间），不是字符串。"沉静内敛"不是有效值，必须写成数字如0.3。不确定就填0.5。',
         responseFormat: 'json',
         temperature: 0.3,
         maxTokens: 2000,
       });
 
+      // response.json is auto-parsed when responseFormat='json'
       if (response.json) {
         profile = response.json as StyleProfile;
+        console.error(
+          '[StyleExtractor] profile.json present. Top keys:',
+          Object.keys(response.json as object).join(', '),
+        );
+
+        // Normalize: LLM may return flat dimensions without wrapping
+        const p = profile as unknown as Record<string, unknown>;
+        if (!p.dimensions) {
+          const dims: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(p)) {
+            if (typeof v === 'number') {
+              dims[k] = { score: v, description: String(k), confidence: 'medium' };
+            } else if (typeof v === 'string') {
+              // LLM gave a description instead of a number — infer score from text
+              const score = inferScoreFromText(v);
+              dims[k] = { score, description: v, confidence: 'low' };
+            } else if (typeof v === 'object' && v !== null && 'score' in (v as object)) {
+              dims[k] = v;
+            }
+          }
+          if (Object.keys(dims).length > 0) {
+            p.dimensions = dims;
+            console.error(
+              '[StyleExtractor] Normalized',
+              Object.keys(dims).length,
+              'flat dims into dimensions',
+            );
+          } else {
+            const sampleEntry = Object.entries(p).find(([k]) => k !== 'dimensions');
+            console.error(
+              '[StyleExtractor] WARNING: No dims extracted. Sample:',
+              sampleEntry?.[0],
+              '→',
+              typeof sampleEntry?.[1],
+              '=',
+              JSON.stringify(sampleEntry?.[1])?.slice(0, 60),
+            );
+          }
+        }
+      } else {
+        // Fallback: try parsing from text
+        const raw = response.text || '';
+        if (raw) {
+          profile = extractJSON(raw) as StyleProfile | null;
+        }
       }
     } catch (err) {
       console.error('[StyleExtractor] LLM extraction failed:', err);
@@ -165,7 +214,7 @@ function buildAnchor(
   profile: StyleProfile | null,
   computational: ComputationalFeatures,
 ): StyleAnchor {
-  if (!profile) {
+  if (!profile || !profile.dimensions) {
     // Computational-only anchoring
     const features: string[] = [];
     if (computational.sentence.shortRatio > 0.5) features.push('短句主导');
@@ -225,25 +274,29 @@ function seedVectorFromProfile(profile: StyleProfile, textSample: string): void 
   }> = [];
 
   // ── D1: Personal Dataset from 14 dimensions ─────────────
-  for (const [key, dim] of Object.entries(profile.dimensions)) {
+  for (const [key, dim] of Object.entries(profile.dimensions || {})) {
     const d = dim as DimensionScore;
+    if (!d) continue;
+    const score = typeof d.score === 'number' ? d.score : Number(d.score);
+    if (isNaN(score)) continue;
     if (d.confidence === 'low') continue;
 
     // Convert each dimension's score into a correction signal
     // Extreme scores (>0.7 or <0.3) get stronger corrections
-    const extremity = Math.abs(d.score - 0.5) * 2; // 0 (neutral) to 1 (extreme)
-    const correction = d.score > 0.5 ? extremity : -extremity;
+    const extremity = Math.abs(score - 0.5) * 2; // 0 (neutral) to 1 (extreme)
+    const correction = score > 0.5 ? extremity : -extremity;
+    const desc = (d.description || '').slice(0, 30);
 
     feedbacks.push({
       dimension: 1,
-      feature: `${key}:${d.description.slice(0, 30)}`,
+      feature: `${key}:${desc}`,
       correction,
-      reason: `D1 seed: ${key}=${d.score.toFixed(2)}`,
+      reason: `D1 seed: ${key}=${score.toFixed(2)}`,
     });
   }
 
   // ── D2: Deviation from average (from uniqueness) ────────
-  if (profile.uniquenessFactor > 0.3) {
+  if (typeof profile.uniquenessFactor === 'number' && profile.uniquenessFactor > 0.3) {
     feedbacks.push({
       dimension: 2,
       feature: `独特风格因子:${profile.uniquenessFactor.toFixed(2)}`,
@@ -253,7 +306,8 @@ function seedVectorFromProfile(profile: StyleProfile, textSample: string): void 
   }
 
   // ── D3: Attention Focus from top words and imagery ──────
-  for (const word of profile.topWords.slice(0, 8)) {
+  for (const word of (profile.topWords || []).slice(0, 8)) {
+    if (!word) continue;
     feedbacks.push({
       dimension: 3,
       feature: word,
@@ -262,7 +316,8 @@ function seedVectorFromProfile(profile: StyleProfile, textSample: string): void 
     });
   }
 
-  for (const imagery of profile.topImagery.slice(0, 5)) {
+  for (const imagery of (profile.topImagery || []).slice(0, 5)) {
+    if (!imagery) continue;
     feedbacks.push({
       dimension: 3,
       feature: imagery,
@@ -271,7 +326,8 @@ function seedVectorFromProfile(profile: StyleProfile, textSample: string): void 
     });
   }
 
-  for (const technique of profile.topTechniques.slice(0, 5)) {
+  for (const technique of (profile.topTechniques || []).slice(0, 5)) {
+    if (!technique) continue;
     feedbacks.push({
       dimension: 3,
       feature: technique,
@@ -376,3 +432,74 @@ function buildUserFeedback(
 
 // Re-export DimensionScore for consumers
 export type { DimensionScore };
+
+// ─── Robust JSON Extraction ────────────────────────────────────
+
+/**
+ * Infer a numeric score from a descriptive text.
+ * Handles common patterns: "沉静而内敛" → 0.3, "热烈激昂" → 0.9, "中性" → 0.5
+ */
+function inferScoreFromText(text: string): number {
+  const t = text.toLowerCase();
+  // High extreme keywords
+  if (/热烈|激昂|极端|极其|非常|极强|十分|强烈/.test(t)) return 0.9;
+  if (/犀利|激烈|浓郁|丰富|突出|密集/.test(t)) return 0.8;
+  if (/较多|偏强|偏多|明显/.test(t)) return 0.7;
+  // Medium-high
+  if (/适中偏|稍强|较多|较浓/.test(t)) return 0.6;
+  // Neutral
+  if (/中等|均衡|适中|平和|中性|自然/.test(t)) return 0.5;
+  // Medium-low
+  if (/偏少|偏弱|较低|较少/.test(t)) return 0.4;
+  if (/克制|含蓄|收敛|冷静|简约/.test(t)) return 0.3;
+  if (/极少|极弱|极其克制/.test(t)) return 0.2;
+  if (/无|全无|空白/.test(t)) return 0.1;
+  // Default
+  return 0.5;
+}
+
+/**
+ * Extract JSON from a potentially messy LLM text response.
+ * Handles: markdown code blocks, trailing text, BOM characters.
+ */
+function extractJSON(raw: string): unknown | null {
+  if (!raw) return null;
+
+  // Strategy 1: Direct parse
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // continue
+  }
+
+  // Strategy 2: Strip markdown code blocks
+  const codeBlockMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (codeBlockMatch) {
+    try {
+      return JSON.parse(codeBlockMatch[1].trim());
+    } catch {
+      // continue
+    }
+  }
+
+  // Strategy 3: Find the first { and last }
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    try {
+      return JSON.parse(raw.slice(firstBrace, lastBrace + 1));
+    } catch {
+      // continue
+    }
+  }
+
+  // Strategy 4: Remove BOM, try again
+  try {
+    const cleaned = raw.replace(/[\u200B\uFEFF]/g, '').trim();
+    return JSON.parse(cleaned);
+  } catch {
+    // give up
+  }
+
+  return null;
+}

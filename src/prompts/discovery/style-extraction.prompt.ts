@@ -80,24 +80,36 @@ export const STYLE_EXTRACTION_PROMPT: PromptTemplate = {
     列出独特的用词习惯(如偏爱文言虚词、方言词汇、特定领域术语等)
     → 描述: 哪些词最能代表这个作者的风格？
 
-【输出格式】
-输出严格的JSON:
+【输出格式——严格按此格式，每个字段都必须存在】
+输出纯JSON（不要markdown代码块）：
 {
-  "authorName": "如果能从文本推断作者或作者类型，填在这里；否则填'unknown'",
+  "authorName": "",
   "dimensions": {
-    "temperature": { "score": 0.0-1.0, "description": "...", "confidence": "high|medium|low" },
-    "sentencePreference": { "score": 0.0-1.0, "description": "...", "confidence": "high|medium|low" },
-    ... (所有14个维度)
+    "temperature": { "score": 0.5, "description": "", "confidence": "medium" },
+    "sentencePreference": { "score": 0.5, "description": "", "confidence": "medium" },
+    "modifierDensity": { "score": 0.5, "description": "", "confidence": "medium" },
+    "languageRegister": { "score": 0.5, "description": "", "confidence": "medium" },
+    "emotionalSpectrum": { "score": 0.5, "description": "", "confidence": "medium", "emotions": [] },
+    "narrativePerspective": { "score": 0.5, "description": "", "confidence": "medium" },
+    "imageryTendency": { "score": 0.5, "description": "", "confidence": "medium", "types": {} },
+    "rhythm": { "score": 0.5, "description": "", "confidence": "medium" },
+    "rhetoricalDevices": { "score": 0.5, "description": "", "confidence": "medium", "devices": [] },
+    "dialogueRatio": { "score": 0.5, "description": "", "confidence": "medium" },
+    "timeHandling": { "score": 0.5, "description": "", "confidence": "medium", "patterns": [] },
+    "endingPattern": { "score": 0.5, "description": "", "confidence": "medium" },
+    "criticalStance": { "score": 0.5, "description": "", "confidence": "medium" },
+    "vocabularyCharacter": { "score": 0.5, "description": "", "confidence": "medium", "words": [], "habits": [] }
   },
-  "topTechniques": ["修辞1", "修辞2", "修辞3"],
-  "topImagery": ["意象类型1", "意象类型2", "意象类型3"],
-  "topWords": ["词1", "词2", "词3", "词4", "词5"],
-  "closestKnownStyle": "最接近的已知作家或风格类型(如'鲁迅式冷峻'、'汪曾祺式冲淡'、'都市白领日常随笔')，如果无法判断填'unknown'",
-  "uniquenessFactor": 0.0-1.0的独特程度(0=非常普通, 1=非常独特),
-  "narrativeSummary": "一段100字以内的整体风格描述"
+  "topTechniques": ["", "", ""],
+  "topImagery": ["", "", ""],
+  "topWords": ["", "", "", "", ""],
+  "closestKnownStyle": "",
+  "uniquenessFactor": 0.5,
+  "narrativeSummary": ""
 }
 
-json中不要添加任何解释文字。`,
+⚠️ 必须使用以上英文字段名（temperature, sentencePreference等），不能自己起中文名。
+⚠️ 不要省略任何字段，没有把握的维度填null。`,
   variables: ['sample_text', 'computational_features'],
   systemPrompt: '你是文学风格分析师。从14个维度提取作者风格特征。输出纯JSON。',
   maxTokens: 2000,
